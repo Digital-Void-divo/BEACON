@@ -31,6 +31,7 @@ import json
 import os
 import base64
 import requests
+import warnings
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -73,7 +74,7 @@ def load_data() -> dict:
             print(f"⚠️  GitHub load failed: {response.status_code}")
     except Exception as e:
         print(f"⚠️  GitHub load error: {e}")
-    return {"bumps": {}, "steals": {}, "last_bump_time": None}
+    return {"bumps": {}, "steals": {}, "last_bump_time": None, "names": {}}
 
 def save_data(data: dict):
     """Write bump_data.json to GitHub. Creates the file if it doesn't exist yet."""
@@ -104,7 +105,30 @@ def get_user_record(data: dict, user_id: str) -> dict:
         # "achievements": data.get("achievements", {}).get(user_id, []),
     }
 
-def is_steal(current_ts: datetime, previous_ts: datetime) -> bool:
+async def resolve_display_name(guild: discord.Guild, user_id: int, data: dict) -> str:
+    """
+    Get a member's display name. Tries the live server first, falls back to
+    the cached name in bump_data.json, then falls back to the raw user ID.
+    Also updates the cache whenever a live name is found.
+    """
+    uid_str = str(user_id)
+    member = guild.get_member(user_id)
+    if member:
+        # Update cache with latest name
+        data.setdefault("names", {})[uid_str] = member.display_name
+        return member.display_name
+    # Try fetching from Discord API (works for users still on Discord, even if left server)
+    try:
+        user = await guild.fetch_member(user_id)
+        data.setdefault("names", {})[uid_str] = user.display_name
+        return user.display_name
+    except discord.NotFound:
+        pass
+    # Fall back to cached name
+    cached = data.get("names", {}).get(uid_str)
+    if cached:
+        return f"{cached} (left)"
+    return f"Unknown ({uid_str})"
     """
     Returns True if current_ts falls within STEAL_WINDOW_SECONDS after
     the BUMP_COOLDOWN_HOURS window from previous_ts.
@@ -149,20 +173,28 @@ def get_interaction_user_id(message: discord.Message) -> int | None:
     Safely get the user ID from a slash command message.
     Uses interaction_metadata (new) with fallback to interaction (deprecated).
     """
-    # New API (discord.py 2.4+)
     if hasattr(message, "interaction_metadata") and message.interaction_metadata is not None:
-        return message.interaction_metadata.user.id
-    # Fallback for older discord.py
-    if message.interaction is not None:
-        return message.interaction.user.id
+        try:
+            return message.interaction_metadata.user.id
+        except AttributeError:
+            pass
+    # Fallback — suppress the deprecation warning since we're using it intentionally
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        if message.interaction is not None:
+            return message.interaction.user.id
     return None
 
 def get_interaction_name(message: discord.Message) -> str | None:
-    """Safely get the slash command name from a message."""
-    if hasattr(message, "interaction_metadata") and message.interaction_metadata is not None:
-        return message.interaction_metadata.name
-    if message.interaction is not None:
-        return message.interaction.name
+    """
+    Safely get the slash command name from a message.
+    interaction_metadata does not expose .name in all discord.py versions,
+    so we use interaction.name with deprecation warnings suppressed.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        if message.interaction is not None:
+            return message.interaction.name
     return None
 
 # ─── EVENTS ───────────────────────────────────────────────────────────────────
@@ -238,14 +270,10 @@ async def handle_successful_bump(disboard_message: discord.Message):
     #     add_achievement(data, user_id_str, "first_steal", "Signal Thief")
 
     data["last_bump_time"] = now.isoformat()
-    save_data(data)
 
     # Confirmation embed
-    try:
-        member = disboard_message.guild.get_member(user_id) or await disboard_message.guild.fetch_member(user_id)
-        display_name = member.display_name
-    except Exception:
-        display_name = f"<@{user_id}>"
+    display_name = await resolve_display_name(disboard_message.guild, user_id, data)
+    save_data(data)  # save again to persist any name cache updates
 
     record = get_user_record(data, user_id_str)
     color = discord.Color.gold() if bump_is_steal else discord.Color.teal()
@@ -278,13 +306,12 @@ async def bumpboard(interaction: discord.Interaction):
 
     for i, (uid, count) in enumerate(sorted_bumpers[:10]):
         member = interaction.guild.get_member(int(uid))
-        name = member.display_name if member else f"Unknown ({uid})"
+        name = member.display_name if member else data.get("names", {}).get(uid, f"Unknown ({uid})")
         steals = data["steals"].get(uid, 0)
         medal = medals[i] if i < 3 else f"`{i+1}.`"
         steal_str = f"  ⚡ {steals} steals" if steals else ""
         lines.append(f"{medal} **{name}** — {count} bumps{steal_str}")
 
-    last_bump = data.get("last_bump_time")
     if last_bump:
         last_dt = datetime.fromisoformat(last_bump)
         if last_dt.tzinfo is None:
@@ -355,7 +382,14 @@ async def beaconscrape(interaction: discord.Interaction):
 
     print(f"[beaconscrape] Starting scan of #{channel.name}...")
 
+    # Fetch ALL messages in a single pass into memory — no nested API calls
+    all_messages = []
     async for message in channel.history(limit=None, oldest_first=True):
+        all_messages.append(message)
+
+    print(f"[beaconscrape] Fetched {len(all_messages)} total messages. Attributing bumps...")
+
+    for idx, message in enumerate(all_messages):
         if message.author.id != DISBOARD_BOT_ID:
             continue
         if not message.embeds:
@@ -366,18 +400,19 @@ async def beaconscrape(interaction: discord.Interaction):
         if "Bump done" not in description and not (embed.title and "Bump done" in embed.title):
             continue
 
-        # Attribute bump — look at messages immediately before this one
+        # Attribute bump by scanning backwards through already-fetched messages
         user_id = None
-        async for prev in channel.history(limit=5, before=message, oldest_first=False):
-            # Prefer slash command interaction (most accurate)
+        display_name = None
+        for prev in reversed(all_messages[:idx]):
             if prev.type == discord.MessageType.chat_input_command:
                 cmd_name = get_interaction_name(prev)
                 if cmd_name == "bump":
                     user_id = get_interaction_user_id(prev)
+                    display_name = prev.author.display_name
                     break
-            # Fallback: any non-bot message just before the confirmation
             if not prev.author.bot:
                 user_id = prev.author.id
+                display_name = prev.author.display_name
                 break
 
         # Ensure timestamp is UTC-aware
@@ -385,7 +420,7 @@ async def beaconscrape(interaction: discord.Interaction):
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
 
-        bump_events.append({"timestamp": ts, "user_id": user_id})
+        bump_events.append({"timestamp": ts, "user_id": user_id, "display_name": display_name})
 
     if not bump_events:
         await interaction.followup.send("❌ No DISBOARD bump confirmations found in this channel.", ephemeral=True)
@@ -393,11 +428,15 @@ async def beaconscrape(interaction: discord.Interaction):
 
     print(f"[beaconscrape] Found {len(bump_events)} bump events. Calculating steals...")
 
-    new_data = {"bumps": {}, "steals": {}, "last_bump_time": None}
+    new_data = {"bumps": {}, "steals": {}, "last_bump_time": None, "names": {}}
 
     for i, event in enumerate(bump_events):
         uid = str(event["user_id"]) if event["user_id"] else "unknown"
         ts  = event["timestamp"]
+
+        # Cache display name if we have one
+        if event["user_id"] and event.get("display_name"):
+            new_data["names"][uid] = event["display_name"]
 
         # Award bump
         new_data["bumps"][uid] = new_data["bumps"].get(uid, 0) + 1
@@ -426,7 +465,7 @@ async def beaconscrape(interaction: discord.Interaction):
     lines = []
     for uid, count in sorted_bumpers[:10]:
         member = interaction.guild.get_member(int(uid))
-        name = member.display_name if member else f"Unknown ({uid})"
+        name = member.display_name if member else new_data.get("names", {}).get(uid, f"Unknown ({uid})")
         steals = new_data["steals"].get(uid, 0)
         steal_str = f"  ⚡ {steals} steals" if steals else ""
         lines.append(f"**{name}** — {count} bumps{steal_str}")
