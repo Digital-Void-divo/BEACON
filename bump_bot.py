@@ -23,6 +23,9 @@ FUTURE EXPANSION POINTS (marked with # TODO: ACHIEVEMENTS):
   - Placeholder spots in /bumpboard and /bumpstats for generated badge images
 """
 
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -31,7 +34,6 @@ import json
 import os
 import base64
 import requests
-import warnings
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -384,10 +386,48 @@ async def beaconscrape(interaction: discord.Interaction):
 
     # Fetch ALL messages in a single pass into memory — no nested API calls
     all_messages = []
+    last_update = datetime.now(timezone.utc)
+
     async for message in channel.history(limit=None, oldest_first=True):
         all_messages.append(message)
 
+        # Count bump confirmations seen so far for progress reporting
+        if (
+            message.author.id == DISBOARD_BOT_ID
+            and message.embeds
+        ):
+            embed = message.embeds[0]
+            desc = embed.description or ""
+            if "Bump done" in desc or (embed.title and "Bump done" in embed.title):
+                bump_events_so_far = sum(
+                    1 for m in all_messages
+                    if m.author.id == DISBOARD_BOT_ID
+                    and m.embeds
+                    and ("Bump done" in (m.embeds[0].description or "") or
+                         (m.embeds[0].title and "Bump done" in m.embeds[0].title))
+                )
+
+        # Send a progress update every 15 seconds
+        now = datetime.now(timezone.utc)
+        if (now - last_update).total_seconds() >= 15:
+            bumps_found = sum(
+                1 for m in all_messages
+                if m.author.id == DISBOARD_BOT_ID
+                and m.embeds
+                and ("Bump done" in (m.embeds[0].description or "") or
+                     (m.embeds[0].title and "Bump done" in m.embeds[0].title))
+            )
+            await interaction.edit_original_response(
+                content=f"🔍 Still scanning... **{len(all_messages):,}** messages read, **{bumps_found}** bumps found so far."
+            )
+            last_update = now
+
     print(f"[beaconscrape] Fetched {len(all_messages)} total messages. Attributing bumps...")
+    await interaction.edit_original_response(
+        content=f"⚙️ Fetch complete — **{len(all_messages):,}** messages scanned. Attributing bumps and calculating steals..."
+    )
+
+    bump_events = []
 
     for idx, message in enumerate(all_messages):
         if message.author.id != DISBOARD_BOT_ID:
