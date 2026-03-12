@@ -39,12 +39,12 @@ import requests
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO  = "Digital-Void-divo/BEACON"  # ← Update this before pushing
+GITHUB_REPO  = "Digital-Void-divo/BEACON"
 GITHUB_FILE  = "bump_data.json"
 
 DISBOARD_BOT_ID      = 302050872383242240
 BUMP_COOLDOWN_HOURS  = 2
-STEAL_WINDOW_SECONDS = 30
+STEAL_WINDOW_SECONDS = 25
 
 # ─── GITHUB DATA HELPERS ──────────────────────────────────────────────────────
 
@@ -383,8 +383,10 @@ async def bumpstats(interaction: discord.Interaction, member: discord.Member = N
                 rank = i + 1
                 break
 
+    # Tag the user in the embed if looking someone up, otherwise just use display name
+    title_name = target.mention if (target != interaction.user) else target.display_name
     embed = discord.Embed(
-        title=f"📊 B34C0N STATS — {target.display_name}",
+        title=f"📊 B34C0N STATS — {title_name}",
         color=discord.Color.teal(),
     )
     embed.set_thumbnail(url=target.display_avatar.url)
@@ -467,15 +469,11 @@ async def beaconscrape(interaction: discord.Interaction):
                     break
                 # A different slash command — skip it, keep scanning backwards
                 continue
-            if not prev.author.bot:
-                user_id = prev.author.id
-                display_name = prev.author.display_name
-                break
+            # Ignore regular chat messages — only /bump slash commands count
 
-        # Ignore bumps incorrectly attributed to DISBOARD itself
+        # Ignore bumps incorrectly attributed to DISBOARD itself — skip entirely
         if user_id == DISBOARD_BOT_ID:
-            user_id = None
-            display_name = None
+            continue
 
         # Ensure timestamp is UTC-aware
         ts = message.created_at
