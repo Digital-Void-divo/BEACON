@@ -33,6 +33,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import os
 import base64
+import re
 import requests
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
@@ -44,7 +45,7 @@ GITHUB_FILE  = "bump_data.json"
 
 DISBOARD_BOT_ID      = 302050872383242240
 BUMP_COOLDOWN_HOURS  = 2
-STEAL_WINDOW_SECONDS = 25
+STEAL_WINDOW_SECONDS = 30
 
 # ─── GITHUB DATA HELPERS ──────────────────────────────────────────────────────
 
@@ -81,19 +82,10 @@ def load_data() -> dict:
 def save_data(data: dict):
     """Write bump_data.json to GitHub. Creates the file if it doesn't exist yet."""
     global _file_sha
-    # If we have no SHA cached, fetch it now — the file may already exist
-    # (e.g. beaconscrape builds new_data without calling load_data first)
-    if not _file_sha:
-        try:
-            r = requests.get(github_api_url(), headers=github_headers(), timeout=10)
-            if r.status_code == 200:
-                _file_sha = r.json().get("sha")
-        except Exception as e:
-            print(f"⚠️  GitHub SHA prefetch error: {e}")
-    encoded = base64.b64encode(json.dumps(data, indent=2).encode("utf-8")).decode("utf-8")
+    content = base64.b64encode(json.dumps(data, indent=2).encode("utf-8")).decode("utf-8")
     payload = {
         "message": "chore: update bump data",
-        "content": encoded,
+        "content": content,
     }
     # Only include SHA if we have one (updating). Omit for first-time creation.
     if _file_sha:
@@ -383,10 +375,8 @@ async def bumpstats(interaction: discord.Interaction, member: discord.Member = N
                 rank = i + 1
                 break
 
-    # Tag the user in the embed if looking someone up, otherwise just use display name
-    title_name = target.mention if (target != interaction.user) else target.display_name
     embed = discord.Embed(
-        title=f"📊 B34C0N STATS — {title_name}",
+        title=f"📊 B34C0N STATS — {target.display_name}",
         color=discord.Color.teal(),
     )
     embed.set_thumbnail(url=target.display_avatar.url)
@@ -461,22 +451,16 @@ async def beaconscrape(interaction: discord.Interaction):
         user_id = None
         display_name = None
         for prev in reversed(all_messages[:idx]):
-            # Never attribute a bump to a bot — skip all bot messages
-            if prev.author.bot:
-                continue
             if prev.type == discord.MessageType.chat_input_command:
                 cmd_name = get_interaction_name(prev)
                 if cmd_name == "bump":
                     user_id = get_interaction_user_id(prev)
                     display_name = prev.author.display_name
                     break
-                # A different slash command — skip it, keep scanning backwards
-                continue
-            # Ignore regular chat messages — only /bump slash commands count
-
-        # Ignore bumps incorrectly attributed to DISBOARD itself — skip entirely
-        if user_id == DISBOARD_BOT_ID:
-            continue
+            if not prev.author.bot:
+                user_id = prev.author.id
+                display_name = prev.author.display_name
+                break
 
         # Ensure timestamp is UTC-aware
         ts = message.created_at
