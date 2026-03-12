@@ -40,12 +40,12 @@ import requests
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO  = "Digital-Void-divo/BEACON"  # ← Update this before pushing
+GITHUB_REPO  = "yourname/digital-wasteland-bot"  # ← Update this before pushing
 GITHUB_FILE  = "bump_data.json"
 
 DISBOARD_BOT_ID      = 302050872383242240
 BUMP_COOLDOWN_HOURS  = 2
-STEAL_WINDOW_SECONDS = 30
+STEAL_WINDOW_SECONDS = 10
 
 # ─── GITHUB DATA HELPERS ──────────────────────────────────────────────────────
 
@@ -503,6 +503,11 @@ async def beaconscrape(interaction: discord.Interaction):
 
     # Record last bump time for live tracking to continue correctly
     new_data["last_bump_time"] = bump_events[-1]["timestamp"].isoformat()
+
+    # Remove DISBOARD from results and totals
+    disboard_id_str = str(DISBOARD_BOT_ID)
+    new_data["bumps"].pop(disboard_id_str, None)
+    new_data["steals"].pop(disboard_id_str, None)
 
     # Separate out unattributed bumps
     unattributed = new_data["bumps"].pop("unknown", 0)
