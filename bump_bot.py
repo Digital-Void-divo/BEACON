@@ -285,11 +285,17 @@ async def bumpboard(interaction: discord.Interaction):
     medals = ["🥇", "🥈", "🥉"]
     lines = []
 
-    for i, (uid, count) in enumerate(sorted_bumpers[:10]):
+    rank = 0
+    for uid, count in sorted_bumpers:
+        if len(lines) >= 10:
+            break
         member = interaction.guild.get_member(int(uid))
-        name = member.display_name if member else data.get("names", {}).get(uid, f"Unknown ({uid})")
+        name = member.display_name if member else data.get("names", {}).get(uid)
+        if not name:
+            continue  # skip unknown users
+        rank += 1
         steals = data["steals"].get(uid, 0)
-        medal = medals[i] if i < 3 else f"`{i+1}.`"
+        medal = medals[rank - 1] if rank <= 3 else f"`{rank}.`"
         steal_str = f"  ⚡ {steals} steals" if steals else ""
         lines.append(f"{medal} **{name}** — {count} bumps{steal_str}")
 
