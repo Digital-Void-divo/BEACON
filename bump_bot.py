@@ -94,6 +94,13 @@ def save_data(data: dict):
         if response.status_code in (200, 201):
             _file_sha = response.json()["content"]["sha"]
             print(f"[B34C0N] bump_data.json saved to GitHub (SHA: {_file_sha[:7]})")
+        elif response.status_code == 404:
+            print(
+                f"⚠️  GitHub save failed (404 Not Found). Check that:\n"
+                f"   1. GITHUB_REPO='{GITHUB_REPO}' matches your actual repo (owner/repo-name)\n"
+                f"   2. Your GITHUB_TOKEN has 'repo' (or 'contents:write') scope\n"
+                f"   Raw response: {response.text}"
+            )
         else:
             print(f"⚠️  GitHub save failed: {response.status_code} {response.text}")
     except Exception as e:
@@ -192,13 +199,21 @@ def get_interaction_user_id(message: discord.Message) -> int | None:
 def get_interaction_name(message: discord.Message) -> str | None:
     """
     Safely get the slash command name from a message.
-    interaction_metadata does not expose .name in all discord.py versions,
-    so we use interaction.name with deprecation warnings suppressed.
+    Tries interaction_metadata (current API) first, falls back to the
+    deprecated interaction attribute only if needed.
     """
+    if hasattr(message, "interaction_metadata") and message.interaction_metadata is not None:
+        name = getattr(message.interaction_metadata, "name", None)
+        if name:
+            return name
+    # Fallback for older discord.py — suppress the deprecation warning
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        if message.interaction is not None:
-            return message.interaction.name
+        try:
+            if message.interaction is not None:
+                return message.interaction.name
+        except Exception:
+            pass
     return None
 
 # ─── EVENTS ───────────────────────────────────────────────────────────────────
@@ -475,9 +490,15 @@ async def beaconscrape(interaction: discord.Interaction):
         # Check for steal against previous bump's timestamp
         if i > 0:
             prev_ts = bump_events[i - 1]["timestamp"]
+            gap_s = (ts - prev_ts).total_seconds()
             if is_steal(ts, prev_ts):
                 new_data["steals"][uid] = new_data["steals"].get(uid, 0) + 1
-                print(f"[beaconscrape] Steal detected: user {uid} at {ts} (prev bump: {prev_ts})")
+                print(f"[beaconscrape] ⚡ Steal! user={uid} gap={gap_s:.0f}s")
+            elif gap_s >= BUMP_COOLDOWN_HOURS * 3600 - 60:
+                # Near-miss diagnostic: within 60s of the steal window
+                window_start = BUMP_COOLDOWN_HOURS * 3600
+                window_end   = window_start + STEAL_WINDOW_SECONDS
+                print(f"[beaconscrape]    near-miss: user={uid} gap={gap_s:.0f}s (steal window={window_start}–{window_end}s)")
 
     # Record last bump time for live tracking to continue correctly
     new_data["last_bump_time"] = bump_events[-1]["timestamp"].isoformat()
