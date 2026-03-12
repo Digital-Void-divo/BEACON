@@ -39,7 +39,7 @@ import requests
 
 BOT_TOKEN    = os.environ.get("BOT_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-GITHUB_REPO  = "Digital-Void-divo/BEACON"
+GITHUB_REPO  = "Digital-Void-divo/BEACON"  # ← Update this before pushing
 GITHUB_FILE  = "bump_data.json"
 
 DISBOARD_BOT_ID      = 302050872383242240
@@ -461,6 +461,9 @@ async def beaconscrape(interaction: discord.Interaction):
         user_id = None
         display_name = None
         for prev in reversed(all_messages[:idx]):
+            # Never attribute a bump to a bot — skip all bot messages
+            if prev.author.bot:
+                continue
             if prev.type == discord.MessageType.chat_input_command:
                 cmd_name = get_interaction_name(prev)
                 if cmd_name == "bump":
