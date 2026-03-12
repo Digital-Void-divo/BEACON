@@ -44,7 +44,7 @@ GITHUB_FILE  = "bump_data.json"
 
 DISBOARD_BOT_ID      = 302050872383242240
 BUMP_COOLDOWN_HOURS  = 2
-STEAL_WINDOW_SECONDS = 60
+STEAL_WINDOW_SECONDS = 20
 
 # ─── GITHUB DATA HELPERS ──────────────────────────────────────────────────────
 
