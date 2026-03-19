@@ -34,7 +34,7 @@ import json
 import os
 import base64
 import re
-import requests
+import aiohttp
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -60,59 +60,61 @@ def github_api_url() -> str:
 
 _file_sha: str | None = None
 
-def load_data() -> dict:
+async def load_data() -> dict:
     """Read bump_data.json from GitHub. Returns empty state if file doesn't exist yet."""
     global _file_sha
     try:
-        response = requests.get(github_api_url(), headers=github_headers(), timeout=10)
-        if response.status_code == 200:
-            payload = response.json()
-            _file_sha = payload["sha"]
-            return json.loads(base64.b64decode(payload["content"]).decode("utf-8"))
-        elif response.status_code == 404:
-            # File doesn't exist yet — will be created on first save
-            _file_sha = None
-            print("[B34C0N] bump_data.json not found on GitHub — will create on first save.")
-        else:
-            print(f"⚠️  GitHub load failed: {response.status_code}")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(github_api_url(), headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    payload = await response.json()
+                    _file_sha = payload["sha"]
+                    return json.loads(base64.b64decode(payload["content"]).decode("utf-8"))
+                elif response.status == 404:
+                    # File doesn't exist yet — will be created on first save
+                    _file_sha = None
+                    print("[B34C0N] bump_data.json not found on GitHub — will create on first save.")
+                else:
+                    print(f"⚠️  GitHub load failed: {response.status}")
     except Exception as e:
         print(f"⚠️  GitHub load error: {e}")
     return {"bumps": {}, "steals": {}, "last_bump_time": None, "names": {}}
 
-def save_data(data: dict):
+async def save_data(data: dict):
     """Write bump_data.json to GitHub. Creates the file if it doesn't exist yet."""
     global _file_sha
-    # If we have no SHA cached, fetch it — the file may already exist on GitHub
-    if not _file_sha:
+    async with aiohttp.ClientSession() as session:
+        # If we have no SHA cached, fetch it — the file may already exist on GitHub
+        if not _file_sha:
+            try:
+                async with session.get(github_api_url(), headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status == 200:
+                        _file_sha = (await r.json()).get("sha")
+            except Exception as e:
+                print(f"⚠️  GitHub SHA prefetch error: {e}")
+        encoded = base64.b64encode(json.dumps(data, indent=2).encode("utf-8")).decode("utf-8")
+        payload = {
+            "message": "chore: update bump data",
+            "content": encoded,
+        }
+        if _file_sha:
+            payload["sha"] = _file_sha
         try:
-            r = requests.get(github_api_url(), headers=github_headers(), timeout=10)
-            if r.status_code == 200:
-                _file_sha = r.json().get("sha")
+            async with session.put(github_api_url(), headers=github_headers(), json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status in (200, 201):
+                    _file_sha = (await response.json())["content"]["sha"]
+                    print(f"[B34C0N] bump_data.json saved to GitHub (SHA: {_file_sha[:7]})")
+                elif response.status == 404:
+                    print(
+                        f"⚠️  GitHub save failed (404 Not Found). Check that:\n"
+                        f"   1. GITHUB_REPO='{GITHUB_REPO}' matches your actual repo (owner/repo-name)\n"
+                        f"   2. Your GITHUB_TOKEN has 'repo' (or 'contents:write') scope\n"
+                        f"   Raw response: {await response.text()}"
+                    )
+                else:
+                    print(f"⚠️  GitHub save failed: {response.status} {await response.text()}")
         except Exception as e:
-            print(f"⚠️  GitHub SHA prefetch error: {e}")
-    encoded = base64.b64encode(json.dumps(data, indent=2).encode("utf-8")).decode("utf-8")
-    payload = {
-        "message": "chore: update bump data",
-        "content": encoded,
-    }
-    if _file_sha:
-        payload["sha"] = _file_sha
-    try:
-        response = requests.put(github_api_url(), headers=github_headers(), json=payload, timeout=10)
-        if response.status_code in (200, 201):
-            _file_sha = response.json()["content"]["sha"]
-            print(f"[B34C0N] bump_data.json saved to GitHub (SHA: {_file_sha[:7]})")
-        elif response.status_code == 404:
-            print(
-                f"⚠️  GitHub save failed (404 Not Found). Check that:\n"
-                f"   1. GITHUB_REPO='{GITHUB_REPO}' matches your actual repo (owner/repo-name)\n"
-                f"   2. Your GITHUB_TOKEN has 'repo' (or 'contents:write') scope\n"
-                f"   Raw response: {response.text}"
-            )
-        else:
-            print(f"⚠️  GitHub save failed: {response.status_code} {response.text}")
-    except Exception as e:
-        print(f"⚠️  GitHub save error: {e}")
+            print(f"⚠️  GitHub save error: {e}")
 
 def get_user_record(data: dict, user_id: str) -> dict:
     return {
@@ -230,7 +232,7 @@ async def handle_successful_bump(disboard_message: discord.Message):
         print(f"⚠️  Could not attribute bump in #{disboard_message.channel.name}")
         return
     user_id_str = str(user_id)
-    data = load_data()
+    data = await load_data()
     last_bump_iso = data.get("last_bump_time")
 
     # Award bump
@@ -254,7 +256,7 @@ async def handle_successful_bump(disboard_message: discord.Message):
 
     # Confirmation embed
     display_name = await resolve_display_name(disboard_message.guild, user_id, data)
-    save_data(data)  # save again to persist any name cache updates
+    await save_data(data)  # save again to persist any name cache updates
 
     record = get_user_record(data, user_id_str)
     color = discord.Color.gold() if bump_is_steal else discord.Color.teal()
@@ -275,9 +277,7 @@ async def handle_successful_bump(disboard_message: discord.Message):
 
 @bot.tree.command(name="bumpboard", description="View the bump leaderboard for The Digital Wasteland")
 async def bumpboard(interaction: discord.Interaction):
-    data = load_data()
-
-    if not data["bumps"]:
+    data = await load_data()
         await interaction.response.send_message("No transmissions recorded yet. Use `/bump` to get started.", ephemeral=True)
         return
 
@@ -330,7 +330,7 @@ async def bumpboard(interaction: discord.Interaction):
 @app_commands.describe(member="The member to look up (defaults to you)")
 async def bumpstats(interaction: discord.Interaction, member: discord.Member = None):
     target = member or interaction.user
-    data = load_data()
+    data = await load_data()
     uid = str(target.id)
     record = get_user_record(data, uid)
 
@@ -376,7 +376,7 @@ async def beaconscrape(interaction: discord.Interaction):
     last_update = datetime.now(timezone.utc)
     bumps_found = 0
 
-    async for message in channel.history(limit=None, oldest_first=True):
+    async for message in channel.history(limit=10000, oldest_first=True):
         all_messages.append(message)
 
         # Count bump confirmations cheaply as we go
@@ -472,7 +472,7 @@ async def beaconscrape(interaction: discord.Interaction):
     unattributed = new_data["bumps"].pop("unknown", 0)
     new_data["steals"].pop("unknown", None)
 
-    save_data(new_data)
+    await save_data(new_data)
 
     # Build result summary
     total_bumps  = sum(new_data["bumps"].values())
