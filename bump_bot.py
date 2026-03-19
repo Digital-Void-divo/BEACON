@@ -277,8 +277,11 @@ async def handle_successful_bump(disboard_message: discord.Message):
 
 @bot.tree.command(name="bumpboard", description="View the bump leaderboard for The Digital Wasteland")
 async def bumpboard(interaction: discord.Interaction):
+    await interaction.response.defer()
     data = await load_data()
-        await interaction.response.send_message("No transmissions recorded yet. Use `/bump` to get started.", ephemeral=True)
+
+    if not data["bumps"]:
+        await interaction.followup.send("No transmissions recorded yet. Use `/bump` to get started.", ephemeral=True)
         return
 
     sorted_bumpers = sorted(data["bumps"].items(), key=lambda x: x[1], reverse=True)
@@ -323,12 +326,13 @@ async def bumpboard(interaction: discord.Interaction):
     )
     embed.set_footer(text=f"{footer}  •  ⚡ = steals")
     # TODO: ACHIEVEMENTS — add a generated banner image here
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 
 @bot.tree.command(name="bumpstats", description="View bump stats for yourself or another member")
 @app_commands.describe(member="The member to look up (defaults to you)")
 async def bumpstats(interaction: discord.Interaction, member: discord.Member = None):
+    await interaction.response.defer()
     target = member or interaction.user
     data = await load_data()
     uid = str(target.id)
@@ -354,7 +358,7 @@ async def bumpstats(interaction: discord.Interaction, member: discord.Member = N
     # TODO: ACHIEVEMENTS — add achievement badges with generated images here
 
     content = target.mention if target != interaction.user else None
-    await interaction.response.send_message(content=content, embed=embed)
+    await interaction.followup.send(content=content, embed=embed)
 
 
 @bot.tree.command(name="beaconscrape", description="[Admin] Scan full channel history to calculate all bumps and steals")
