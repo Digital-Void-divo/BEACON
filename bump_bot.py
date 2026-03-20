@@ -13,9 +13,12 @@ SETUP:
 3. Push all files to GitHub, Railway will auto-deploy
 
 COMMANDS:
-  /bumpboard      — View the bump leaderboard
-  /bumpstats      — View stats for yourself or another member
-  /beaconscrape   — (Admin only) Scan full channel history and calculate all bumps + steals
+  /bumpboard          — View the bump leaderboard
+  /bumpstats          — View stats for yourself or another member
+  /bumpboardcycle     — (Admin only) Archive the current leaderboard and reset for a new round
+  /bumpboardhistory   — View the top 3 from every archived cycle
+  /bumpboardreset     — (Admin only) Reset the current leaderboard without archiving
+  /beaconscrape       — (Admin only) Scan full channel history and calculate all bumps + steals
 
 FUTURE EXPANSION POINTS (marked with # TODO: ACHIEVEMENTS):
   - add_achievement() helper is ready to uncomment and call from anywhere
@@ -515,6 +518,142 @@ async def beaconscrape(interaction: discord.Interaction):
 async def beaconscrape_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ You need Administrator permissions to run this command.", ephemeral=True)
+
+
+@bot.tree.command(name="bumpboardcycle", description="[Admin] Archive the current leaderboard and start a fresh round")
+@app_commands.describe(name="A name for this cycle (e.g. 'Season 1', 'March 2026')")
+@app_commands.checks.has_permissions(administrator=True)
+async def bumpboardcycle(interaction: discord.Interaction, name: str):
+    await interaction.response.defer(ephemeral=True)
+    data = await load_data()
+
+    if not data.get("bumps"):
+        await interaction.followup.send("❌ No bumps recorded yet — nothing to archive.", ephemeral=True)
+        return
+
+    # Check for duplicate cycle name
+    existing_cycles = data.get("cycles", [])
+    if any(c["name"].lower() == name.lower() for c in existing_cycles):
+        await interaction.followup.send(f"❌ A cycle named **{name}** already exists. Choose a different name.", ephemeral=True)
+        return
+
+    # Build the archive entry from current state
+    cycle_entry = {
+        "name": name,
+        "archived_at": datetime.now(timezone.utc).isoformat(),
+        "bumps": dict(data["bumps"]),
+        "steals": dict(data["steals"]),
+        "names": dict(data.get("names", {})),
+    }
+    existing_cycles.append(cycle_entry)
+
+    # Reset live leaderboard
+    data["cycles"] = existing_cycles
+    data["bumps"] = {}
+    data["steals"] = {}
+    data["last_bump_time"] = None
+
+    await save_data(data)
+
+    total_bumps = sum(cycle_entry["bumps"].values())
+    await interaction.followup.send(
+        f"✅ Cycle **{name}** archived with **{total_bumps}** bumps across **{len(cycle_entry['bumps'])}** participants.\n"
+        f"The leaderboard has been reset. Let the next round begin!",
+        ephemeral=True,
+    )
+    print(f"[bumpboardcycle] Archived cycle '{name}' — {total_bumps} bumps, {len(cycle_entry['bumps'])} users.")
+
+
+@bumpboardcycle.error
+async def bumpboardcycle_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ You need Administrator permissions to run this command.", ephemeral=True)
+
+
+@bot.tree.command(name="bumpboardhistory", description="View the top 3 from every archived leaderboard cycle")
+async def bumpboardhistory(interaction: discord.Interaction):
+    await interaction.response.defer()
+    data = await load_data()
+
+    cycles = data.get("cycles", [])
+    if not cycles:
+        await interaction.followup.send("No cycles have been archived yet. Use `/bumpboardcycle` to close out a round.", ephemeral=True)
+        return
+
+    medals = ["🥇", "🥈", "🥉"]
+    embed = discord.Embed(
+        title="📜 B34C0N CYCLE HISTORY",
+        color=discord.Color.teal(),
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    for cycle in cycles:
+        cycle_name = cycle["name"]
+        cycle_bumps = cycle.get("bumps", {})
+        cycle_steals = cycle.get("steals", {})
+        cycle_names = cycle.get("names", {})
+
+        if not cycle_bumps:
+            embed.add_field(name=f"〔{cycle_name}〕", value="*No data*", inline=False)
+            continue
+
+        sorted_bumpers = sorted(cycle_bumps.items(), key=lambda x: x[1], reverse=True)
+        lines = []
+        for i, (uid, count) in enumerate(sorted_bumpers[:3]):
+            # Prefer live server name, fall back to cycle's cached name
+            member = interaction.guild.get_member(int(uid))
+            name = member.display_name if member else cycle_names.get(uid, f"Unknown ({uid})")
+            steals = cycle_steals.get(uid, 0)
+            steal_str = f"  ⚡ {steals}" if steals else ""
+            lines.append(f"{medals[i]} **{name}** — {count} bumps{steal_str}")
+
+        archived_dt = datetime.fromisoformat(cycle["archived_at"])
+        archived_str = archived_dt.strftime("%b %d, %Y")
+        embed.add_field(
+            name=f"〔{cycle_name}〕 • {archived_str}",
+            value="\n".join(lines),
+            inline=False,
+        )
+
+    embed.set_footer(text="⚡ = steals")
+    await interaction.followup.send(embed=embed)
+
+
+@bumpboardhistory.error
+async def bumpboardhistory_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ You need Administrator permissions to run this command.", ephemeral=True)
+
+
+@bot.tree.command(name="bumpboardreset", description="[Admin] Reset the current leaderboard without archiving")
+@app_commands.checks.has_permissions(administrator=True)
+async def bumpboardreset(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    data = await load_data()
+
+    if not data.get("bumps"):
+        await interaction.followup.send("❌ The leaderboard is already empty.", ephemeral=True)
+        return
+
+    participant_count = len(data["bumps"])
+    data["bumps"] = {}
+    data["steals"] = {}
+    data["last_bump_time"] = None
+
+    await save_data(data)
+
+    await interaction.followup.send(
+        f"🗑️ Leaderboard reset. **{participant_count}** participant(s) cleared — no cycle was saved.",
+        ephemeral=True,
+    )
+    print(f"[bumpboardreset] Leaderboard wiped ({participant_count} users cleared, no archive).")
+
+
+@bumpboardreset.error
+async def bumpboardreset_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ You need Administrator permissions to run this command.", ephemeral=True)
+
 
 # ─── RUN ──────────────────────────────────────────────────────────────────────
 
