@@ -1074,27 +1074,28 @@ class WaypointView(discord.ui.View):
         return embed
 
     async def _render_and_send(self, interaction: discord.Interaction):
-        file = None
+        # Update text immediately so buttons feel responsive
+        embed = self._build_embed()
+        await interaction.edit_original_response(attachments=[], embed=embed, view=self)
+
+        # Then attempt image render
         missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
-        if missing:
-            print(f"⚠️  Waypoint assets missing: {missing} — skipping image render")
-        else:
+        if not missing:
             try:
-                loop = asyncio.get_running_loop()
-                buf  = await loop.run_in_executor(
-                    None, build_waypoint_image, self.earned_ids, self.custom_wps, self.page
+                buf  = await asyncio.wait_for(
+                    asyncio.get_running_loop().run_in_executor(
+                        None, build_waypoint_image, self.earned_ids, self.custom_wps, self.page
+                    ),
+                    timeout=20.0
                 )
-                file = discord.File(buf, filename=f"waypoints_{self.uid}_p{self.page}.png")
+                fname = f"waypoints_{self.uid}_p{self.page}.png"
+                file  = discord.File(buf, filename=fname)
+                embed.set_image(url=f"attachment://{fname}")
+                await interaction.edit_original_response(attachments=[file], embed=embed, view=self)
+            except asyncio.TimeoutError:
+                print("⚠️  Waypoint page render timed out after 20s")
             except Exception as e:
                 print(f"⚠️  Waypoint render error: {e}")
-
-        embed = self._build_embed()
-        fname = f"waypoints_{self.uid}_p{self.page}.png"
-        if file:
-            embed.set_image(url=f"attachment://{fname}")
-            await interaction.edit_original_response(attachments=[file], embed=embed, view=self)
-        else:
-            await interaction.edit_original_response(embed=embed, view=self)
 
     @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1129,24 +1130,25 @@ async def waypointcheck(interaction: discord.Interaction, member: discord.Member
 
     view = WaypointView(target, uid, earned_ids, custom_wps, total_pages, page=0)
 
-    file = None
+    # Always send text embed immediately so the interaction never hangs
+    embed = view._build_embed()
+    msg = await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
+
+    # Then attempt image render and edit the message if successful
     missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
-    if missing:
-        print(f"⚠️  Waypoint assets missing: {missing} — skipping image render")
-    else:
+    if not missing:
         try:
-            loop = asyncio.get_running_loop()
-            buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0)
+            buf  = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0),
+                timeout=20.0
+            )
             file = discord.File(buf, filename=f"waypoints_{uid}_p0.png")
+            embed.set_image(url=f"attachment://waypoints_{uid}_p0.png")
+            await msg.edit(attachments=[file], embed=embed)
+        except asyncio.TimeoutError:
+            print("⚠️  Waypoint image render timed out after 20s")
         except Exception as e:
             print(f"⚠️  Waypoint image generation failed: {e}")
-
-    embed = view._build_embed()
-    if file:
-        embed.set_image(url=f"attachment://waypoints_{uid}_p0.png")
-        await interaction.followup.send(content=mention, file=file, embed=embed, view=view if total_pages > 1 else None)
-    else:
-        await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
 
 
 @waypointcheck.error
