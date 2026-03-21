@@ -23,6 +23,7 @@ COMMANDS:
   /bumpboardhistory   — View the top 3 from every archived cycle
   /bumpboardreset     — (Admin only) Reset the current leaderboard without archiving
   /waypointcheck      — View earned Waypoints for yourself or another member
+  /waypointgrant      — (Owner only) Grant a custom Waypoint to a member
   /beaconscrape       — (Admin only) Scan full channel history and calculate all bumps + steals
 
 FUTURE EXPANSION POINTS (marked with # TODO: ACHIEVEMENTS):
@@ -58,6 +59,11 @@ GITHUB_FILE  = "bump_data.json"
 DISBOARD_BOT_ID      = 302050872383242240
 BUMP_COOLDOWN_HOURS  = 2
 STEAL_WINDOW_SECONDS = 30
+OWNER_ID             = 204185815696277504  # only this user can /waypointgrant
+
+# In-memory cache of custom_waypoints list from waypoint_data.json
+# Populated on bot ready and refreshed on every save_waypoint_data call
+_custom_waypoints_cache: list = []
 
 # ─── WAYPOINTS ────────────────────────────────────────────────────────────────
 
@@ -220,6 +226,8 @@ async def save_waypoint_data(data: dict):
                 if response.status in (200, 201):
                     _waypoint_sha = (await response.json())["content"]["sha"]
                     print(f"[B34C0N] waypoint_data.json saved to GitHub (SHA: {_waypoint_sha[:7]})")
+                    global _custom_waypoints_cache
+                    _custom_waypoints_cache = data.get("custom_waypoints", [])
                 else:
                     print(f"⚠️  GitHub waypoint save failed: {response.status} {await response.text()}")
         except Exception as e:
@@ -238,22 +246,27 @@ def award_waypoint(data: dict, user_id_str: str, waypoint_id: str) -> bool:
     return False
 
 
-def check_bump_waypoints(bump_data: dict, wp_data: dict, user_id_str: str, now: datetime, last_bump_iso: str | None) -> None:
-    """Check and award all bump-triggered waypoints. Reads counts from bump_data, writes awards to wp_data."""
+def check_bump_waypoints(bump_data: dict, wp_data: dict, user_id_str: str, now: datetime, last_bump_iso: str | None) -> list:
+    """Check and award all bump-triggered waypoints. Returns list of newly awarded waypoint IDs."""
     bump_count  = bump_data["bumps"].get(user_id_str, 0)
     steal_count = bump_data["steals"].get(user_id_str, 0)
+    newly_earned = []
+
+    def _award(wp_id):
+        if award_waypoint(wp_data, user_id_str, wp_id):
+            newly_earned.append(wp_id)
 
     # Bump count milestones
-    if bump_count >= 1:   award_waypoint(wp_data, user_id_str, "first_transmission")
-    if bump_count >= 10:  award_waypoint(wp_data, user_id_str, "signal_booster")
-    if bump_count >= 50:  award_waypoint(wp_data, user_id_str, "tower_operator")
-    if bump_count >= 100: award_waypoint(wp_data, user_id_str, "grid_architect")
+    if bump_count >= 1:   _award("first_transmission")
+    if bump_count >= 10:  _award("signal_booster")
+    if bump_count >= 50:  _award("tower_operator")
+    if bump_count >= 100: _award("grid_architect")
 
     # Steal milestones
-    if steal_count >= 1:  award_waypoint(wp_data, user_id_str, "signal_thief")
-    if steal_count >= 5:  award_waypoint(wp_data, user_id_str, "scavenger")
-    if steal_count >= 25: award_waypoint(wp_data, user_id_str, "frequency_jacker")
-    if steal_count >= 50: award_waypoint(wp_data, user_id_str, "ransomware")
+    if steal_count >= 1:  _award("signal_thief")
+    if steal_count >= 5:  _award("scavenger")
+    if steal_count >= 25: _award("frequency_jacker")
+    if steal_count >= 50: _award("ransomware")
 
     # Timing waypoints — seconds elapsed after the cooldown reset
     if last_bump_iso:
@@ -262,9 +275,9 @@ def check_bump_waypoints(bump_data: dict, wp_data: dict, user_id_str: str, now: 
             last_ts = last_ts.replace(tzinfo=timezone.utc)
         cooldown_reset = last_ts + timedelta(hours=BUMP_COOLDOWN_HOURS)
         seconds_after  = (now - cooldown_reset).total_seconds()
-        if 0 <= seconds_after <= 10: award_waypoint(wp_data, user_id_str, "speedy")
-        if 0 <= seconds_after <= 5:  award_waypoint(wp_data, user_id_str, "clockwork")
-        if 0 <= seconds_after <= 1:  award_waypoint(wp_data, user_id_str, "race_condition")
+        if 0 <= seconds_after <= 10: _award("speedy")
+        if 0 <= seconds_after <= 5:  _award("clockwork")
+        if 0 <= seconds_after <= 1:  _award("race_condition")
 
     # 7-day consecutive calendar-day streak (UTC dates)
     today_str  = now.strftime("%Y-%m-%d")
@@ -279,43 +292,57 @@ def check_bump_waypoints(bump_data: dict, wp_data: dict, user_id_str: str, now: 
         for i in range(len(dates) - 6):
             streak = dates[i:i + 7]
             if all((streak[j + 1] - streak[j]).days == 1 for j in range(6)):
-                award_waypoint(wp_data, user_id_str, "reliable_signal")
+                _award("reliable_signal")
                 break
 
+    return newly_earned
 
-def check_cycle_waypoints(wp_data: dict, cycle_bumps: dict) -> None:
-    """Award cycle-placement waypoints after an archive. Reads/writes wp_data only."""
+
+def check_cycle_waypoints(wp_data: dict, cycle_bumps: dict) -> dict:
+    """Award cycle-placement waypoints after an archive. Returns {uid: [newly_awarded_wp_ids]}."""
     if not cycle_bumps:
-        return
+        return {}
 
     sorted_bumpers = sorted(cycle_bumps.items(), key=lambda x: x[1], reverse=True)
     top3   = [uid for uid, _ in sorted_bumpers[:3]]
     winner = top3[0] if top3 else None
+    newly_earned: dict[str, list] = {}
+
+    def _award(uid, wp_id):
+        if award_waypoint(wp_data, uid, wp_id):
+            newly_earned.setdefault(uid, []).append(wp_id)
 
     # Podium Regular: finish top 3 in 3+ cycles
     podium_counts = wp_data.setdefault("podium_counts", {})
     for uid in top3:
         podium_counts[uid] = podium_counts.get(uid, 0) + 1
         if podium_counts[uid] >= 3:
-            award_waypoint(wp_data, uid, "podium_regular")
+            _award(uid, "podium_regular")
 
     # Wasteland Champion + Dynasty
     if winner:
-        award_waypoint(wp_data, winner, "wasteland_champion")
+        _award(winner, "wasteland_champion")
         if wp_data.get("last_cycle_winner") == winner:
-            award_waypoint(wp_data, winner, "dynasty")
+            _award(winner, "dynasty")
         wp_data["last_cycle_winner"] = winner
 
+    return newly_earned
 
-def build_waypoint_image(earned_ids: list) -> BytesIO:
+
+def build_waypoint_image(earned_ids: list, custom_wps: list, page: int = 0) -> BytesIO:
     """
     Render the 5x3 Waypoint grid onto the oval background.
+    page=0 is the first page. Custom earned waypoints always appear first.
     Required assets (relative to bot script):
-      waypoint_background.png, waypoint_slot.png, WaypointFont.otf,
-      waypoints/<waypoint_id>.png  (one per waypoint)
+      waypoint_background.png, waypoint_slot.png, waypoint_slot_custom.png,
+      WaypointFont.otf, waypoints/<waypoint_id>.png
     """
-    bg       = Image.open(ASSET_DIR / "waypoint_background.png").convert("RGBA")
-    slot_src = Image.open(ASSET_DIR / "waypoint_slot.png").convert("RGBA")
+    bg           = Image.open(ASSET_DIR / "waypoint_background.png").convert("RGBA")
+    slot_std     = Image.open(ASSET_DIR / "waypoint_slot.png").convert("RGBA")
+    slot_cst_src = None
+    cst_path     = ASSET_DIR / "waypoint_slot_custom.png"
+    if cst_path.exists():
+        slot_cst_src = Image.open(cst_path).convert("RGBA")
     bg_w, bg_h = bg.size
 
     # Oval interior in pixels
@@ -347,9 +374,17 @@ def build_waypoint_image(earned_ids: list) -> BytesIO:
     if font is None:
         font = ImageFont.load_default()
 
+    # Build ordered slot list for this page:
+    # Custom earned first (only earned ones show), then all 15 standard waypoints
+    earned_custom = [wp for wp in custom_wps if wp["id"] in earned_ids]
+    all_slots = [{"wp": wp, "is_custom": True} for wp in earned_custom] +                 [{"wp": wp, "is_custom": False} for wp in WAYPOINTS]
+    page_slots = all_slots[page * 15 : (page + 1) * 15]
+
     result = bg.copy()
 
-    for idx, wp in enumerate(WAYPOINTS):
+    for idx, slot_info in enumerate(page_slots):
+        wp         = slot_info["wp"]
+        is_custom  = slot_info["is_custom"]
         row = idx // GRID_COLS
         col = idx % GRID_COLS
 
@@ -358,14 +393,15 @@ def build_waypoint_image(earned_ids: list) -> BytesIO:
 
         earned = wp["id"] in earned_ids
 
-        # Resize slot frame to badge dimensions
-        slot = slot_src.resize((badge_w, badge_h), Image.LANCZOS).copy()
+        # Choose correct slot frame
+        src  = (slot_cst_src if slot_cst_src else slot_std) if is_custom else slot_std
+        slot = src.resize((badge_w, badge_h), Image.LANCZOS).copy()
 
         if not earned:
-            # Desaturate and darken for unearned slots
+            # Partially desaturate and darken for unearned standard slots
             rgb  = slot.convert("RGB")
-            rgb  = ImageEnhance.Color(rgb).enhance(0.0)
-            rgb  = ImageEnhance.Brightness(rgb).enhance(0.35)
+            rgb  = ImageEnhance.Color(rgb).enhance(0.15)
+            rgb  = ImageEnhance.Brightness(rgb).enhance(0.50)
             r, g, b = rgb.split()
             slot = Image.merge("RGBA", (r, g, b, slot.split()[3]))
 
@@ -491,10 +527,14 @@ def get_interaction_name(message: discord.Message) -> str | None:
 
 @bot.event
 async def on_ready():
+    global _custom_waypoints_cache
     await bot.tree.sync()
+    wp_data = await load_waypoint_data()
+    _custom_waypoints_cache = wp_data.get("custom_waypoints", [])
     print(f"✅ B34C0N online as {bot.user} (ID: {bot.user.id})")
     print(f"   Steal window: {STEAL_WINDOW_SECONDS}s | Slash commands synced")
     print(f"   Persisting data to: github.com/{GITHUB_REPO}/{GITHUB_FILE}")
+    print(f"   Custom waypoints loaded: {len(_custom_waypoints_cache)}")
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -532,7 +572,7 @@ async def handle_successful_bump(disboard_message: discord.Message):
             data["steals"][user_id_str] = data["steals"].get(user_id_str, 0) + 1
 
     # Check and award bump-triggered waypoints (writes to wp_data)
-    check_bump_waypoints(data, wp_data, user_id_str, now, last_bump_iso)
+    newly_earned = check_bump_waypoints(data, wp_data, user_id_str, now, last_bump_iso)
 
     data["last_bump_time"] = now.isoformat()
 
@@ -555,6 +595,20 @@ async def handle_successful_bump(disboard_message: discord.Message):
 
     embed = discord.Embed(title=title, description="\n".join(lines), color=color, timestamp=now)
     await disboard_message.channel.send(embed=embed)
+
+    # Announce any newly earned waypoints
+    wp_lookup = {wp["id"]: wp for wp in WAYPOINTS}
+    for wp_id in newly_earned:
+        wp = wp_lookup.get(wp_id)
+        if not wp:
+            continue
+        wp_embed = discord.Embed(
+            title="📡 WAYPOINT UNLOCKED",
+            description=f"<@{user_id}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
+            color=discord.Color.gold(),
+            timestamp=now,
+        )
+        await disboard_message.channel.send(embed=wp_embed)
 
 # ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
 
@@ -828,8 +882,8 @@ async def bumpboardcycle(interaction: discord.Interaction, name: str):
     existing_cycles.append(cycle_entry)
 
     # Award cycle placement waypoints (in separate waypoint_data.json)
-    wp_data = await load_waypoint_data()
-    check_cycle_waypoints(wp_data, cycle_entry["bumps"])
+    wp_data      = await load_waypoint_data()
+    cycle_awards = check_cycle_waypoints(wp_data, cycle_entry["bumps"])
     await save_waypoint_data(wp_data)
 
     # Reset live leaderboard
@@ -847,6 +901,22 @@ async def bumpboardcycle(interaction: discord.Interaction, name: str):
         ephemeral=True,
     )
     print(f"[bumpboardcycle] Archived cycle '{name}' — {total_bumps} bumps, {len(cycle_entry['bumps'])} users.")
+
+    # Announce any waypoints earned from cycle placement
+    wp_lookup = {wp["id"]: wp for wp in WAYPOINTS}
+    now = datetime.now(timezone.utc)
+    for uid, wp_ids in cycle_awards.items():
+        for wp_id in wp_ids:
+            wp = wp_lookup.get(wp_id)
+            if not wp:
+                continue
+            wp_embed = discord.Embed(
+                title="📡 WAYPOINT UNLOCKED",
+                description=f"<@{uid}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
+                color=discord.Color.gold(),
+                timestamp=now,
+            )
+            await interaction.channel.send(embed=wp_embed)
 
 
 @bumpboardcycle.error
@@ -941,53 +1011,183 @@ async def bumpboardreset_error(interaction: discord.Interaction, error: app_comm
 
 
 
+# ─── WAYPOINT PAGINATION VIEW ─────────────────────────────────────────────────
+
+class WaypointView(discord.ui.View):
+    """Paginated view for /waypointcheck. Renders a new image per page."""
+
+    def __init__(self, target: discord.Member, uid: str, earned_ids: list, custom_wps: list, total_pages: int, page: int = 0):
+        super().__init__(timeout=120)
+        self.target      = target
+        self.uid         = uid
+        self.earned_ids  = earned_ids
+        self.custom_wps  = custom_wps
+        self.total_pages = total_pages
+        self.page        = page
+        self._update_buttons()
+
+    def _update_buttons(self):
+        self.prev_btn.disabled = self.page == 0
+        self.next_btn.disabled = self.page >= self.total_pages - 1
+
+    def _build_embed(self) -> discord.Embed:
+        # Ordered slot list matching the renderer
+        earned_custom = [wp for wp in self.custom_wps if wp["id"] in self.earned_ids]
+        all_slots     = [{"wp": wp, "is_custom": True}  for wp in earned_custom] +                         [{"wp": wp, "is_custom": False} for wp in WAYPOINTS]
+        page_slots    = all_slots[self.page * 15 : (self.page + 1) * 15]
+
+        earned_wps = [s["wp"] for s in page_slots if s["wp"]["id"] in self.earned_ids]
+        total_earned = len(self.earned_ids)
+
+        embed = discord.Embed(
+            title=f"📡 WAYPOINTS — {self.target.display_name}",
+            color=discord.Color.teal(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        if earned_wps:
+            embed.description = "\n".join(
+                f"**{wp['name']}** — {wp['description']}" for wp in earned_wps
+            )
+        else:
+            embed.description = "*No Waypoints earned on this page.*"
+        embed.set_footer(text=f"{total_earned} Waypoints earned  •  Page {self.page + 1}/{self.total_pages}")
+        return embed
+
+    async def _render_and_send(self, interaction: discord.Interaction):
+        loop = asyncio.get_event_loop()
+        file = None
+        try:
+            buf  = await loop.run_in_executor(
+                None, build_waypoint_image, self.earned_ids, self.custom_wps, self.page
+            )
+            file = discord.File(buf, filename=f"waypoints_{self.uid}_p{self.page}.png")
+        except Exception as e:
+            print(f"⚠️  Waypoint render error: {e}")
+
+        embed = self._build_embed()
+        fname = f"waypoints_{self.uid}_p{self.page}.png"
+        if file:
+            embed.set_image(url=f"attachment://{fname}")
+            await interaction.edit_original_response(attachments=[file], embed=embed, view=self)
+        else:
+            await interaction.edit_original_response(embed=embed, view=self)
+
+    @discord.ui.button(label="◀ Prev", style=discord.ButtonStyle.secondary)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.page -= 1
+        self._update_buttons()
+        await self._render_and_send(interaction)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.secondary)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        self.page += 1
+        self._update_buttons()
+        await self._render_and_send(interaction)
+
+
 @bot.tree.command(name="waypointcheck", description="View earned Waypoints for yourself or another member")
 @app_commands.describe(member="The member to check (defaults to you)")
 async def waypointcheck(interaction: discord.Interaction, member: discord.Member = None):
     await interaction.response.defer()
-    target     = member or interaction.user
-    wp_data    = await load_waypoint_data()
-    uid        = str(target.id)
-    earned_ids = wp_data.get("waypoints", {}).get(uid, [])
-    mention    = target.mention if target != interaction.user else None
+    target      = member or interaction.user
+    wp_data     = await load_waypoint_data()
+    uid         = str(target.id)
+    earned_ids  = wp_data.get("waypoints", {}).get(uid, [])
+    custom_wps  = wp_data.get("custom_waypoints", [])
+    mention     = target.mention if target != interaction.user else None
 
-    # Generate image in executor so PIL doesn't block the event loop
+    # Total slots = earned custom + all 15 standard
+    earned_custom  = [wp for wp in custom_wps if wp["id"] in earned_ids]
+    total_slots    = len(earned_custom) + len(WAYPOINTS)
+    total_pages    = max(1, -(-total_slots // 15))  # ceiling division
+
+    view = WaypointView(target, uid, earned_ids, custom_wps, total_pages, page=0)
+
     loop = asyncio.get_event_loop()
     file = None
     try:
-        buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids)
-        file = discord.File(buf, filename=f"waypoints_{uid}.png")
+        buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0)
+        file = discord.File(buf, filename=f"waypoints_{uid}_p0.png")
     except FileNotFoundError as e:
         print(f"⚠️  Waypoint asset missing: {e}")
     except Exception as e:
         print(f"⚠️  Waypoint image generation failed: {e}")
 
-    # Embed listing earned waypoints with descriptions
-    earned_wps = [wp for wp in WAYPOINTS if wp["id"] in earned_ids]
-    embed = discord.Embed(
-        title=f"📡 WAYPOINTS — {target.display_name}",
-        color=discord.Color.teal(),
-        timestamp=datetime.now(timezone.utc),
-    )
-    if earned_wps:
-        embed.description = "\n".join(
-            f"**{wp['name']}** — {wp['description']}" for wp in earned_wps
-        )
-    else:
-        embed.description = "*No Waypoints earned yet.*"
-    embed.set_footer(text=f"{len(earned_ids)}/15 Waypoints earned")
-
+    embed = view._build_embed()
     if file:
-        embed.set_image(url=f"attachment://waypoints_{uid}.png")
-        await interaction.followup.send(content=mention, file=file, embed=embed)
+        embed.set_image(url=f"attachment://waypoints_{uid}_p0.png")
+        await interaction.followup.send(content=mention, file=file, embed=embed, view=view if total_pages > 1 else None)
     else:
-        await interaction.followup.send(content=mention, embed=embed)
+        await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
 
 
 @waypointcheck.error
 async def waypointcheck_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
         await interaction.response.send_message("❌ You need permissions to run this command.", ephemeral=True)
+
+
+# ─── WAYPOINTGRANT COMMAND ─────────────────────────────────────────────────────
+
+async def custom_waypoint_autocomplete(interaction: discord.Interaction, current: str):
+    """Autocomplete for /waypointgrant — pulls from in-memory custom waypoint cache."""
+    return [
+        app_commands.Choice(name=wp["name"], value=wp["id"])
+        for wp in _custom_waypoints_cache
+        if current.lower() in wp["name"].lower()
+    ][:25]
+
+
+@bot.tree.command(name="waypointgrant", description="[Owner] Grant a custom Waypoint to a member")
+@app_commands.describe(member="The member to grant the Waypoint to", waypoint="The custom Waypoint to grant")
+@app_commands.autocomplete(waypoint=custom_waypoint_autocomplete)
+async def waypointgrant(interaction: discord.Interaction, member: discord.Member, waypoint: str):
+    await interaction.response.defer(ephemeral=True)
+
+    if interaction.user.id != OWNER_ID:
+        await interaction.followup.send("❌ Only the server owner can grant custom Waypoints.", ephemeral=True)
+        return
+
+    wp_data    = await load_waypoint_data()
+    custom_wps = wp_data.get("custom_waypoints", [])
+    wp         = next((w for w in custom_wps if w["id"] == waypoint), None)
+
+    if not wp:
+        await interaction.followup.send(
+            f"❌ No custom Waypoint with ID `{waypoint}` found. Check `waypoint_data.json`.",
+            ephemeral=True
+        )
+        return
+
+    uid = str(member.id)
+    if not award_waypoint(wp_data, uid, wp["id"]):
+        await interaction.followup.send(
+            f"ℹ️ **{member.display_name}** already has the **{wp['name']}** Waypoint.",
+            ephemeral=True
+        )
+        return
+
+    await save_waypoint_data(wp_data)
+    await interaction.followup.send(
+        f"✅ Granted **{wp['name']}** to **{member.display_name}**.",
+        ephemeral=True
+    )
+
+    # Announce in channel
+    announce_embed = discord.Embed(
+        title="📡 WAYPOINT UNLOCKED",
+        description=f"<@{uid}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
+        color=discord.Color.gold(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    await interaction.channel.send(embed=announce_embed)
+
+
+@waypointgrant.error
+async def waypointgrant_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    await interaction.response.send_message("❌ An error occurred with /waypointgrant.", ephemeral=True)
 
 
 # ─── RUN ──────────────────────────────────────────────────────────────────────
