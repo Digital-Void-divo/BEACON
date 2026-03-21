@@ -1111,8 +1111,10 @@ class WaypointView(discord.ui.View):
 @app_commands.describe(member="The member to check (defaults to you)")
 async def waypointcheck(interaction: discord.Interaction, member: discord.Member = None):
     await interaction.response.defer()
+    print(f"[waypointcheck] deferred, fetching wp_data...")
     target      = member or interaction.user
     wp_data     = await load_waypoint_data()
+    print(f"[waypointcheck] wp_data loaded, building slot list...")
     uid         = str(target.id)
     earned_ids  = wp_data.get("waypoints", {}).get(uid, [])
     custom_wps  = wp_data.get("custom_waypoints", [])
@@ -1128,21 +1130,25 @@ async def waypointcheck(interaction: discord.Interaction, member: discord.Member
     file = None
     missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
     if missing:
-        print(f"⚠️  Waypoint assets missing: {missing} — skipping image render")
+        print(f"[waypointcheck] assets missing: {missing} — skipping image render")
     else:
+        print(f"[waypointcheck] assets found, starting render...")
         try:
             loop = asyncio.get_running_loop()
             buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0)
             file = discord.File(buf, filename=f"waypoints_{uid}_p0.png")
+            print(f"[waypointcheck] render complete")
         except Exception as e:
             print(f"⚠️  Waypoint image generation failed: {e}")
 
+    print(f"[waypointcheck] sending response...")
     embed = view._build_embed()
     if file:
         embed.set_image(url=f"attachment://waypoints_{uid}_p0.png")
         await interaction.followup.send(content=mention, file=file, embed=embed, view=view if total_pages > 1 else None)
     else:
         await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
+    print(f"[waypointcheck] done.")
 
 
 @waypointcheck.error
