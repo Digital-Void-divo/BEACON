@@ -49,8 +49,8 @@ GRID_COLS   = 5
 GRID_ROWS   = 3
 GRID_PAD_X  = 30    # px padding inside oval on each side
 GRID_PAD_Y  = 22
-BADGE_GAP_X = 16    # px gap between badge columns
-BADGE_GAP_Y = 14    # px gap between badge rows
+BADGE_GAP_X = 8    # px gap between badge columns
+BADGE_GAP_Y = 8    # px gap between badge rows
 
 # Slot image regions as fractions of badge dimensions
 SLOT_WP_LEFT       = 0.06   # waypoint image paste region within slot
