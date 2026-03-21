@@ -1132,7 +1132,10 @@ async def waypointcheck(interaction: discord.Interaction, member: discord.Member
 
     # Always send text embed immediately so the interaction never hangs
     embed = view._build_embed()
-    msg = await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
+    send_kwargs = {"content": mention, "embed": embed}
+    if total_pages > 1:
+        send_kwargs["view"] = view
+    msg = await interaction.followup.send(**send_kwargs)
 
     # Then attempt image render and edit the message if successful
     missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
