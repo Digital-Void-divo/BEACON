@@ -63,9 +63,11 @@ STEAL_WINDOW_SECONDS = 30
 OWNER_ID             = 204185815696277504  # only this user can /waypointgrant
 ANNOUNCE_CHANNEL_ID  = 1470826482015146024  # channel for all waypoint announcements
 
-# In-memory cache of custom_waypoints list from waypoint_data.json
-# Populated on bot ready and refreshed on every save_waypoint_data call
+# In-memory cache of the full waypoint_data.json dict and custom_waypoints list.
+# Populated on bot ready and refreshed on every save_waypoint_data call.
+# waypointcheck reads from this cache — no GitHub call needed per use.
 _custom_waypoints_cache: list = []
+_waypoint_data_cache: dict = {"waypoints": {}, "bump_dates": {}, "podium_counts": {}, "last_cycle_winner": None, "custom_waypoints": []}
 
 def get_announce_channel(guild: discord.Guild) -> discord.TextChannel | None:
     """Return the designated waypoint announcement channel, or None if not found."""
@@ -232,8 +234,9 @@ async def save_waypoint_data(data: dict):
                 if response.status in (200, 201):
                     _waypoint_sha = (await response.json())["content"]["sha"]
                     print(f"[B34C0N] waypoint_data.json saved to GitHub (SHA: {_waypoint_sha[:7]})")
-                    global _custom_waypoints_cache
+                    global _custom_waypoints_cache, _waypoint_data_cache
                     _custom_waypoints_cache = data.get("custom_waypoints", [])
+                    _waypoint_data_cache    = data
                 else:
                     print(f"⚠️  GitHub waypoint save failed: {response.status} {await response.text()}")
         except Exception as e:
@@ -539,9 +542,10 @@ def get_interaction_name(message: discord.Message) -> str | None:
 
 @bot.event
 async def on_ready():
-    global _custom_waypoints_cache
+    global _custom_waypoints_cache, _waypoint_data_cache
     await bot.tree.sync()
     wp_data = await load_waypoint_data()
+    _waypoint_data_cache    = wp_data
     _custom_waypoints_cache = wp_data.get("custom_waypoints", [])
     print(f"✅ B34C0N online as {bot.user} (ID: {bot.user.id})")
     print(f"   Steal window: {STEAL_WINDOW_SECONDS}s | Slash commands synced")
@@ -1111,32 +1115,38 @@ class WaypointView(discord.ui.View):
 @app_commands.describe(member="The member to check (defaults to you)")
 async def waypointcheck(interaction: discord.Interaction, member: discord.Member = None):
     await interaction.response.defer()
-    print(f"[waypointcheck] deferred", flush=True)
-    target      = member or interaction.user
-    print(f"[waypointcheck] loading wp_data...", flush=True)
-    wp_data     = await load_waypoint_data()
-    print(f"[waypointcheck] wp_data loaded", flush=True)
-    uid         = str(target.id)
-    earned_ids  = wp_data.get("waypoints", {}).get(uid, [])
-    custom_wps  = wp_data.get("custom_waypoints", [])
-    mention     = target.mention if target != interaction.user else None
+    target     = member or interaction.user
+    uid        = str(target.id)
+    # Use in-memory cache — no GitHub call needed for a read-only command
+    earned_ids = _waypoint_data_cache.get("waypoints", {}).get(uid, [])
+    custom_wps = _waypoint_data_cache.get("custom_waypoints", [])
+    mention    = target.mention if target != interaction.user else None
 
     # Total slots = earned custom + all 15 standard
-    earned_custom  = [wp for wp in custom_wps if wp["id"] in earned_ids]
-    total_slots    = len(earned_custom) + len(WAYPOINTS)
-    total_pages    = max(1, -(-total_slots // 15))  # ceiling division
-    print(f"[waypointcheck] pages={total_pages} earned={len(earned_ids)}", flush=True)
+    earned_custom = [wp for wp in custom_wps if wp["id"] in earned_ids]
+    total_slots   = len(earned_custom) + len(WAYPOINTS)
+    total_pages   = max(1, -(-total_slots // 15))  # ceiling division
 
     view = WaypointView(target, uid, earned_ids, custom_wps, total_pages, page=0)
 
-    # IMAGE RENDER TEMPORARILY DISABLED — testing text-only response
     file = None
+    missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
+    if missing:
+        print(f"⚠️  Waypoint assets missing: {missing} — skipping image render")
+    else:
+        try:
+            loop = asyncio.get_running_loop()
+            buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0)
+            file = discord.File(buf, filename=f"waypoints_{uid}_p0.png")
+        except Exception as e:
+            print(f"⚠️  Waypoint image generation failed: {e}")
 
-    print(f"[waypointcheck] building embed...", flush=True)
     embed = view._build_embed()
-    print(f"[waypointcheck] sending...", flush=True)
-    await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
-    print(f"[waypointcheck] done.", flush=True)
+    if file:
+        embed.set_image(url=f"attachment://waypoints_{uid}_p0.png")
+        await interaction.followup.send(content=mention, file=file, embed=embed, view=view if total_pages > 1 else None)
+    else:
+        await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
 
 
 @waypointcheck.error
