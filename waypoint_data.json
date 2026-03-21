@@ -7,10 +7,15 @@
     "1110321588613685382": [
       "wasteland_champion",
       "first_transmission",
-      "dynasty"
+      "dynasty",
+      "podium_regular"
     ],
     "118358069276049414": [
-      "first_transmission"
+      "first_transmission",
+      "podium_regular"
+    ],
+    "503229348493656074": [
+      "podium_regular"
     ]
   },
   "bump_dates": {
@@ -25,9 +30,9 @@
     ]
   },
   "podium_counts": {
-    "1110321588613685382": 2,
-    "118358069276049414": 2,
-    "503229348493656074": 2
+    "1110321588613685382": 3,
+    "118358069276049414": 3,
+    "503229348493656074": 3
   },
   "last_cycle_winner": "1110321588613685382",
   "custom_waypoints": [
