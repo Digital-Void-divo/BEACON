@@ -253,7 +253,7 @@ def build_waypoint_image(earned_ids: list) -> BytesIO:
     """
     Render the 5x3 Waypoint grid onto the oval background.
     Required assets (relative to bot script):
-      waypoint_background.png, waypoint_slot.png, WaypointFont.ttf,
+      waypoint_background.png, waypoint_slot.png, WaypointFont.otf,
       waypoints/<waypoint_id>.png  (one per waypoint)
     """
     bg       = Image.open(ASSET_DIR / "waypoint_background.png").convert("RGBA")
@@ -275,7 +275,7 @@ def build_waypoint_image(earned_ids: list) -> BytesIO:
     # Font
     font_size = max(10, int(badge_h * 0.085))
     try:
-        font = ImageFont.truetype(str(ASSET_DIR / "WaypointFont.ttf"), font_size)
+        font = ImageFont.truetype(str(ASSET_DIR / "WaypointFont.otf"), font_size)
     except Exception:
         font = ImageFont.load_default()
 
