@@ -2,8 +2,12 @@
 B34C0N — Bump Tracker for The Digital Wasteland
 ================================================
 Tracks DISBOARD bumps and steals with slash commands.
-bump_data.json lives in your GitHub repo and is read/written via the GitHub API
-on every successful bump. Railway only needs BOT_TOKEN and GITHUB_TOKEN set.
+bump_data.json and waypoint_data.json live in your GitHub repo and are
+read/written via the GitHub API. Railway only needs BOT_TOKEN and GITHUB_TOKEN set.
+
+DATA FILES:
+  bump_data.json     — bumps, steals, cycles, names
+  waypoint_data.json — waypoints, streaks, podium counts
 
 SETUP:
 1. Set these environment variables in Railway:
@@ -79,25 +83,26 @@ ASSET_DIR        = Path(__file__).parent
 WAYPOINT_IMG_DIR = ASSET_DIR / "waypoints"
 
 # Oval interior bounds as fractions of background image dimensions
-OVAL_LEFT_F   = 0.075
-OVAL_TOP_F    = 0.095
-OVAL_RIGHT_F  = 0.925
-OVAL_BOTTOM_F = 0.890
+# Calibrated for 1536x1024 background
+OVAL_LEFT_F   = 0.10
+OVAL_TOP_F    = 0.165
+OVAL_RIGHT_F  = 0.90
+OVAL_BOTTOM_F = 0.845
 
 # Badge grid layout
 GRID_COLS   = 5
 GRID_ROWS   = 3
-GRID_PAD_X  = 25    # px padding inside oval on each side
-GRID_PAD_Y  = 20
-BADGE_GAP_X = 12    # px gap between badge columns
-BADGE_GAP_Y = 10    # px gap between badge rows
+GRID_PAD_X  = 30    # px padding inside oval on each side
+GRID_PAD_Y  = 22
+BADGE_GAP_X = 16    # px gap between badge columns
+BADGE_GAP_Y = 14    # px gap between badge rows
 
 # Slot image regions as fractions of badge dimensions
 SLOT_WP_LEFT       = 0.06   # waypoint image paste region within slot
-SLOT_WP_TOP        = 0.03
+SLOT_WP_TOP        = 0.04
 SLOT_WP_RIGHT      = 0.94
-SLOT_WP_BOTTOM     = 0.80
-SLOT_TEXT_CENTER_Y = 0.875  # vertical center of nameplate text
+SLOT_WP_BOTTOM     = 0.76
+SLOT_TEXT_CENTER_Y = 0.885  # vertical center of nameplate text
 
 # ─── GITHUB DATA HELPERS ──────────────────────────────────────────────────────
 
@@ -168,6 +173,59 @@ async def save_data(data: dict):
         except Exception as e:
             print(f"⚠️  GitHub save error: {e}")
 
+
+GITHUB_WAYPOINT_FILE = "waypoint_data.json"
+_waypoint_sha: str | None = None
+
+def github_waypoint_url() -> str:
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_WAYPOINT_FILE}"
+
+async def load_waypoint_data() -> dict:
+    """Read waypoint_data.json from GitHub."""
+    global _waypoint_sha
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(github_waypoint_url(), headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    payload = await response.json()
+                    _waypoint_sha = payload["sha"]
+                    return json.loads(base64.b64decode(payload["content"]).decode("utf-8"))
+                elif response.status == 404:
+                    _waypoint_sha = None
+                    print("[B34C0N] waypoint_data.json not found on GitHub — will create on first save.")
+                else:
+                    print(f"⚠️  GitHub waypoint load failed: {response.status}")
+    except Exception as e:
+        print(f"⚠️  GitHub waypoint load error: {e}")
+    return {"waypoints": {}, "bump_dates": {}, "podium_counts": {}, "last_cycle_winner": None}
+
+
+async def save_waypoint_data(data: dict):
+    """Write waypoint_data.json to GitHub."""
+    global _waypoint_sha
+    async with aiohttp.ClientSession() as session:
+        if not _waypoint_sha:
+            try:
+                async with session.get(github_waypoint_url(), headers=github_headers(), timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status == 200:
+                        _waypoint_sha = (await r.json()).get("sha")
+            except Exception as e:
+                print(f"⚠️  GitHub waypoint SHA prefetch error: {e}")
+        encoded = base64.b64encode(json.dumps(data, indent=2).encode("utf-8")).decode("utf-8")
+        payload = {"message": "chore: update waypoint data", "content": encoded}
+        if _waypoint_sha:
+            payload["sha"] = _waypoint_sha
+        try:
+            async with session.put(github_waypoint_url(), headers=github_headers(), json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status in (200, 201):
+                    _waypoint_sha = (await response.json())["content"]["sha"]
+                    print(f"[B34C0N] waypoint_data.json saved to GitHub (SHA: {_waypoint_sha[:7]})")
+                else:
+                    print(f"⚠️  GitHub waypoint save failed: {response.status} {await response.text()}")
+        except Exception as e:
+            print(f"⚠️  GitHub waypoint save error: {e}")
+
+
 # ─── WAYPOINT HELPERS ─────────────────────────────────────────────────────────
 
 def award_waypoint(data: dict, user_id_str: str, waypoint_id: str) -> bool:
@@ -180,22 +238,22 @@ def award_waypoint(data: dict, user_id_str: str, waypoint_id: str) -> bool:
     return False
 
 
-def check_bump_waypoints(data: dict, user_id_str: str, now: datetime, last_bump_iso: str | None) -> None:
-    """Check and award all bump-triggered waypoints. Modifies data in-place."""
-    bump_count  = data["bumps"].get(user_id_str, 0)
-    steal_count = data["steals"].get(user_id_str, 0)
+def check_bump_waypoints(bump_data: dict, wp_data: dict, user_id_str: str, now: datetime, last_bump_iso: str | None) -> None:
+    """Check and award all bump-triggered waypoints. Reads counts from bump_data, writes awards to wp_data."""
+    bump_count  = bump_data["bumps"].get(user_id_str, 0)
+    steal_count = bump_data["steals"].get(user_id_str, 0)
 
     # Bump count milestones
-    if bump_count >= 1:   award_waypoint(data, user_id_str, "first_transmission")
-    if bump_count >= 10:  award_waypoint(data, user_id_str, "signal_booster")
-    if bump_count >= 50:  award_waypoint(data, user_id_str, "tower_operator")
-    if bump_count >= 100: award_waypoint(data, user_id_str, "grid_architect")
+    if bump_count >= 1:   award_waypoint(wp_data, user_id_str, "first_transmission")
+    if bump_count >= 10:  award_waypoint(wp_data, user_id_str, "signal_booster")
+    if bump_count >= 50:  award_waypoint(wp_data, user_id_str, "tower_operator")
+    if bump_count >= 100: award_waypoint(wp_data, user_id_str, "grid_architect")
 
     # Steal milestones
-    if steal_count >= 1:  award_waypoint(data, user_id_str, "signal_thief")
-    if steal_count >= 5:  award_waypoint(data, user_id_str, "scavenger")
-    if steal_count >= 25: award_waypoint(data, user_id_str, "frequency_jacker")
-    if steal_count >= 50: award_waypoint(data, user_id_str, "ransomware")
+    if steal_count >= 1:  award_waypoint(wp_data, user_id_str, "signal_thief")
+    if steal_count >= 5:  award_waypoint(wp_data, user_id_str, "scavenger")
+    if steal_count >= 25: award_waypoint(wp_data, user_id_str, "frequency_jacker")
+    if steal_count >= 50: award_waypoint(wp_data, user_id_str, "ransomware")
 
     # Timing waypoints — seconds elapsed after the cooldown reset
     if last_bump_iso:
@@ -204,13 +262,13 @@ def check_bump_waypoints(data: dict, user_id_str: str, now: datetime, last_bump_
             last_ts = last_ts.replace(tzinfo=timezone.utc)
         cooldown_reset = last_ts + timedelta(hours=BUMP_COOLDOWN_HOURS)
         seconds_after  = (now - cooldown_reset).total_seconds()
-        if 0 <= seconds_after <= 10: award_waypoint(data, user_id_str, "speedy")
-        if 0 <= seconds_after <= 5:  award_waypoint(data, user_id_str, "clockwork")
-        if 0 <= seconds_after <= 1:  award_waypoint(data, user_id_str, "race_condition")
+        if 0 <= seconds_after <= 10: award_waypoint(wp_data, user_id_str, "speedy")
+        if 0 <= seconds_after <= 5:  award_waypoint(wp_data, user_id_str, "clockwork")
+        if 0 <= seconds_after <= 1:  award_waypoint(wp_data, user_id_str, "race_condition")
 
     # 7-day consecutive calendar-day streak (UTC dates)
     today_str  = now.strftime("%Y-%m-%d")
-    bump_dates = data.setdefault("bump_dates", {}).setdefault(user_id_str, [])
+    bump_dates = wp_data.setdefault("bump_dates", {}).setdefault(user_id_str, [])
     if today_str not in bump_dates:
         bump_dates.append(today_str)
     bump_dates.sort()
@@ -221,12 +279,12 @@ def check_bump_waypoints(data: dict, user_id_str: str, now: datetime, last_bump_
         for i in range(len(dates) - 6):
             streak = dates[i:i + 7]
             if all((streak[j + 1] - streak[j]).days == 1 for j in range(6)):
-                award_waypoint(data, user_id_str, "reliable_signal")
+                award_waypoint(wp_data, user_id_str, "reliable_signal")
                 break
 
 
-def check_cycle_waypoints(data: dict, cycle_bumps: dict) -> None:
-    """Award cycle-placement waypoints after an archive. Modifies data in-place."""
+def check_cycle_waypoints(wp_data: dict, cycle_bumps: dict) -> None:
+    """Award cycle-placement waypoints after an archive. Reads/writes wp_data only."""
     if not cycle_bumps:
         return
 
@@ -235,18 +293,18 @@ def check_cycle_waypoints(data: dict, cycle_bumps: dict) -> None:
     winner = top3[0] if top3 else None
 
     # Podium Regular: finish top 3 in 3+ cycles
-    podium_counts = data.setdefault("podium_counts", {})
+    podium_counts = wp_data.setdefault("podium_counts", {})
     for uid in top3:
         podium_counts[uid] = podium_counts.get(uid, 0) + 1
         if podium_counts[uid] >= 3:
-            award_waypoint(data, uid, "podium_regular")
+            award_waypoint(wp_data, uid, "podium_regular")
 
     # Wasteland Champion + Dynasty
     if winner:
-        award_waypoint(data, winner, "wasteland_champion")
-        if data.get("last_cycle_winner") == winner:
-            award_waypoint(data, winner, "dynasty")
-        data["last_cycle_winner"] = winner
+        award_waypoint(wp_data, winner, "wasteland_champion")
+        if wp_data.get("last_cycle_winner") == winner:
+            award_waypoint(wp_data, winner, "dynasty")
+        wp_data["last_cycle_winner"] = winner
 
 
 def build_waypoint_image(earned_ids: list) -> BytesIO:
@@ -272,11 +330,21 @@ def build_waypoint_image(earned_ids: list) -> BytesIO:
     badge_w  = usable_w // GRID_COLS
     badge_h  = usable_h // GRID_ROWS
 
-    # Font
-    font_size = max(10, int(badge_h * 0.085))
-    try:
-        font = ImageFont.truetype(str(ASSET_DIR / "WaypointFont.otf"), font_size)
-    except Exception:
+    # Font — shrink until longest label fits within nameplate width
+    max_label_w = int(badge_w * 0.92)
+    font_size   = max(11, int(badge_h * 0.115))
+    font        = None
+    while font_size >= 10:
+        try:
+            f    = ImageFont.truetype(str(ASSET_DIR / "WaypointFont.otf"), font_size)
+            bbox = f.getbbox("Wasteland Champion")
+            if (bbox[2] - bbox[0]) <= max_label_w:
+                font = f
+                break
+        except Exception:
+            break
+        font_size -= 1
+    if font is None:
         font = ImageFont.load_default()
 
     result = bg.copy()
@@ -291,13 +359,13 @@ def build_waypoint_image(earned_ids: list) -> BytesIO:
         earned = wp["id"] in earned_ids
 
         # Resize slot frame to badge dimensions
-        slot = slot_src.resize((badge_w, badge_h), Image.LANCZOS)
+        slot = slot_src.resize((badge_w, badge_h), Image.LANCZOS).copy()
 
         if not earned:
             # Desaturate and darken for unearned slots
             rgb  = slot.convert("RGB")
             rgb  = ImageEnhance.Color(rgb).enhance(0.0)
-            rgb  = ImageEnhance.Brightness(rgb).enhance(0.4)
+            rgb  = ImageEnhance.Brightness(rgb).enhance(0.35)
             r, g, b = rgb.split()
             slot = Image.merge("RGBA", (r, g, b, slot.split()[3]))
 
@@ -310,20 +378,18 @@ def build_waypoint_image(earned_ids: list) -> BytesIO:
                 rx1 = int(badge_w * SLOT_WP_RIGHT)
                 ry1 = int(badge_h * SLOT_WP_BOTTOM)
                 wp_img = wp_img.resize((rx1 - rx0, ry1 - ry0), Image.LANCZOS)
-                slot.paste(wp_img, (rx0, ry0), wp_img)
+                slot.paste(wp_img, (rx0, ry0), wp_img.split()[3])
 
         # Nameplate text
-        draw   = ImageDraw.Draw(slot)
-        label  = wp["name"] if earned else "???"
-        color  = (255, 215, 80, 255) if earned else (140, 140, 140, 200)
-        try:
-            bbox   = draw.textbbox((0, 0), label, font=font)
-            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        except AttributeError:
-            tw, th = draw.textsize(label, font=font)
-        tx = (badge_w - tw) // 2
+        draw  = ImageDraw.Draw(slot)
+        label = wp["name"] if earned else "???"
+        color = (255, 215, 80, 255) if earned else (160, 160, 160, 255)
+
+        bbox   = font.getbbox(label)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        tx = max(2, (badge_w - tw) // 2)
         ty = int(badge_h * SLOT_TEXT_CENTER_Y) - th // 2
-        draw.text((tx + 1, ty + 1), label, font=font, fill=(0, 0, 0, 200))
+        draw.text((tx + 1, ty + 1), label, font=font, fill=(0, 0, 0, 230))
         draw.text((tx,     ty),     label, font=font, fill=color)
 
         result.paste(slot, (bx, by), slot)
@@ -450,7 +516,8 @@ async def handle_successful_bump(disboard_message: discord.Message):
         print(f"⚠️  Could not attribute bump in #{disboard_message.channel.name}")
         return
     user_id_str = str(user_id)
-    data = await load_data()
+    data    = await load_data()
+    wp_data = await load_waypoint_data()
     last_bump_iso = data.get("last_bump_time")
 
     # Award bump
@@ -464,14 +531,15 @@ async def handle_successful_bump(disboard_message: discord.Message):
             bump_is_steal = True
             data["steals"][user_id_str] = data["steals"].get(user_id_str, 0) + 1
 
-    # Check and award bump-triggered waypoints
-    check_bump_waypoints(data, user_id_str, now, last_bump_iso)
+    # Check and award bump-triggered waypoints (writes to wp_data)
+    check_bump_waypoints(data, wp_data, user_id_str, now, last_bump_iso)
 
     data["last_bump_time"] = now.isoformat()
 
     # Confirmation embed
     display_name = await resolve_display_name(disboard_message.guild, user_id, data)
-    await save_data(data)  # save again to persist any name cache updates
+    await save_data(data)
+    await save_waypoint_data(wp_data)
 
     record = get_user_record(data, user_id_str)
     color = discord.Color.gold() if bump_is_steal else discord.Color.teal()
@@ -486,7 +554,7 @@ async def handle_successful_bump(disboard_message: discord.Message):
         lines.append(f"\n*Signal intercepted within {STEAL_WINDOW_SECONDS}s of cooldown reset.*")
 
     embed = discord.Embed(title=title, description="\n".join(lines), color=color, timestamp=now)
-    await disboard_message.channel.send(embed=embed, delete_after=30)
+    await disboard_message.channel.send(embed=embed)
 
 # ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
 
@@ -759,8 +827,10 @@ async def bumpboardcycle(interaction: discord.Interaction, name: str):
     }
     existing_cycles.append(cycle_entry)
 
-    # Award cycle placement waypoints before wiping the leaderboard
-    check_cycle_waypoints(data, cycle_entry["bumps"])
+    # Award cycle placement waypoints (in separate waypoint_data.json)
+    wp_data = await load_waypoint_data()
+    check_cycle_waypoints(wp_data, cycle_entry["bumps"])
+    await save_waypoint_data(wp_data)
 
     # Reset live leaderboard
     data["cycles"] = existing_cycles
@@ -876,9 +946,10 @@ async def bumpboardreset_error(interaction: discord.Interaction, error: app_comm
 async def waypointcheck(interaction: discord.Interaction, member: discord.Member = None):
     await interaction.response.defer()
     target     = member or interaction.user
-    data       = await load_data()
+    wp_data    = await load_waypoint_data()
     uid        = str(target.id)
-    earned_ids = data.get("waypoints", {}).get(uid, [])
+    earned_ids = wp_data.get("waypoints", {}).get(uid, [])
+    mention    = target.mention if target != interaction.user else None
 
     # Generate image in executor so PIL doesn't block the event loop
     loop = asyncio.get_event_loop()
@@ -908,9 +979,9 @@ async def waypointcheck(interaction: discord.Interaction, member: discord.Member
 
     if file:
         embed.set_image(url=f"attachment://waypoints_{uid}.png")
-        await interaction.followup.send(file=file, embed=embed)
+        await interaction.followup.send(content=mention, file=file, embed=embed)
     else:
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(content=mention, embed=embed)
 
 
 @waypointcheck.error
