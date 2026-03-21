@@ -1111,10 +1111,11 @@ class WaypointView(discord.ui.View):
 @app_commands.describe(member="The member to check (defaults to you)")
 async def waypointcheck(interaction: discord.Interaction, member: discord.Member = None):
     await interaction.response.defer()
-    print(f"[waypointcheck] deferred, fetching wp_data...")
+    print(f"[waypointcheck] deferred", flush=True)
     target      = member or interaction.user
+    print(f"[waypointcheck] loading wp_data...", flush=True)
     wp_data     = await load_waypoint_data()
-    print(f"[waypointcheck] wp_data loaded, building slot list...")
+    print(f"[waypointcheck] wp_data loaded", flush=True)
     uid         = str(target.id)
     earned_ids  = wp_data.get("waypoints", {}).get(uid, [])
     custom_wps  = wp_data.get("custom_waypoints", [])
@@ -1124,31 +1125,18 @@ async def waypointcheck(interaction: discord.Interaction, member: discord.Member
     earned_custom  = [wp for wp in custom_wps if wp["id"] in earned_ids]
     total_slots    = len(earned_custom) + len(WAYPOINTS)
     total_pages    = max(1, -(-total_slots // 15))  # ceiling division
+    print(f"[waypointcheck] pages={total_pages} earned={len(earned_ids)}", flush=True)
 
     view = WaypointView(target, uid, earned_ids, custom_wps, total_pages, page=0)
 
+    # IMAGE RENDER TEMPORARILY DISABLED — testing text-only response
     file = None
-    missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
-    if missing:
-        print(f"[waypointcheck] assets missing: {missing} — skipping image render")
-    else:
-        print(f"[waypointcheck] assets found, starting render...")
-        try:
-            loop = asyncio.get_running_loop()
-            buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0)
-            file = discord.File(buf, filename=f"waypoints_{uid}_p0.png")
-            print(f"[waypointcheck] render complete")
-        except Exception as e:
-            print(f"⚠️  Waypoint image generation failed: {e}")
 
-    print(f"[waypointcheck] sending response...")
+    print(f"[waypointcheck] building embed...", flush=True)
     embed = view._build_embed()
-    if file:
-        embed.set_image(url=f"attachment://waypoints_{uid}_p0.png")
-        await interaction.followup.send(content=mention, file=file, embed=embed, view=view if total_pages > 1 else None)
-    else:
-        await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
-    print(f"[waypointcheck] done.")
+    print(f"[waypointcheck] sending...", flush=True)
+    await interaction.followup.send(content=mention, embed=embed, view=view if total_pages > 1 else None)
+    print(f"[waypointcheck] done.", flush=True)
 
 
 @waypointcheck.error
