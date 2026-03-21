@@ -1,8 +1,19 @@
 {
-  "waypoints": {},
+  "waypoints": {
+    "204185815696277504": [
+      "first_transmission"
+    ],
+    "1110321588613685382": [
+      "wasteland_champion"
+    ]
+  },
   "bump_dates": {},
-  "podium_counts": {},
-  "last_cycle_winner": null,
+  "podium_counts": {
+    "1110321588613685382": 1,
+    "118358069276049414": 1,
+    "503229348493656074": 1
+  },
+  "last_cycle_winner": "1110321588613685382",
   "custom_waypoints": [
     {
       "id": "last_man_standing",
