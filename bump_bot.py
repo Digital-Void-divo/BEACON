@@ -1070,15 +1070,19 @@ class WaypointView(discord.ui.View):
         return embed
 
     async def _render_and_send(self, interaction: discord.Interaction):
-        loop = asyncio.get_event_loop()
         file = None
-        try:
-            buf  = await loop.run_in_executor(
-                None, build_waypoint_image, self.earned_ids, self.custom_wps, self.page
-            )
-            file = discord.File(buf, filename=f"waypoints_{self.uid}_p{self.page}.png")
-        except Exception as e:
-            print(f"⚠️  Waypoint render error: {e}")
+        missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
+        if missing:
+            print(f"⚠️  Waypoint assets missing: {missing} — skipping image render")
+        else:
+            try:
+                loop = asyncio.get_running_loop()
+                buf  = await loop.run_in_executor(
+                    None, build_waypoint_image, self.earned_ids, self.custom_wps, self.page
+                )
+                file = discord.File(buf, filename=f"waypoints_{self.uid}_p{self.page}.png")
+            except Exception as e:
+                print(f"⚠️  Waypoint render error: {e}")
 
         embed = self._build_embed()
         fname = f"waypoints_{self.uid}_p{self.page}.png"
@@ -1121,15 +1125,17 @@ async def waypointcheck(interaction: discord.Interaction, member: discord.Member
 
     view = WaypointView(target, uid, earned_ids, custom_wps, total_pages, page=0)
 
-    loop = asyncio.get_event_loop()
     file = None
-    try:
-        buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0)
-        file = discord.File(buf, filename=f"waypoints_{uid}_p0.png")
-    except FileNotFoundError as e:
-        print(f"⚠️  Waypoint asset missing: {e}")
-    except Exception as e:
-        print(f"⚠️  Waypoint image generation failed: {e}")
+    missing = [f for f in ["waypoint_background.png", "waypoint_slot.png"] if not (ASSET_DIR / f).exists()]
+    if missing:
+        print(f"⚠️  Waypoint assets missing: {missing} — skipping image render")
+    else:
+        try:
+            loop = asyncio.get_running_loop()
+            buf  = await loop.run_in_executor(None, build_waypoint_image, earned_ids, custom_wps, 0)
+            file = discord.File(buf, filename=f"waypoints_{uid}_p0.png")
+        except Exception as e:
+            print(f"⚠️  Waypoint image generation failed: {e}")
 
     embed = view._build_embed()
     if file:
