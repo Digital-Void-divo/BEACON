@@ -1,0 +1,17 @@
+{
+  "waypoints": {
+    "204185815696277504": [
+      "first_transmission",
+      "signal_booster",
+      "signal_thief",
+      "scavenger"
+    ]
+  },
+  "bump_dates": {
+    "204185815696277504": [
+      "2026-03-21"
+    ]
+  },
+  "podium_counts": {},
+  "last_cycle_winner": null
+}
