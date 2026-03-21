@@ -1,24 +1,23 @@
 {
-  "waypoints": {
-    "204185815696277504": [
-      "first_transmission",
-      "signal_booster",
-      "signal_thief",
-      "scavenger"
-    ],
-    "1110321588613685382": [
-      "wasteland_champion"
-    ]
-  },
-  "bump_dates": {
-    "204185815696277504": [
-      "2026-03-21"
-    ]
-  },
-  "podium_counts": {
-    "1110321588613685382": 1,
-    "118358069276049414": 1,
-    "503229348493656074": 1
-  },
-  "last_cycle_winner": "1110321588613685382"
+  "waypoints": {},
+  "bump_dates": {},
+  "podium_counts": {},
+  "last_cycle_winner": null,
+  "custom_waypoints": [
+    {
+      "id": "last_man_standing",
+      "name": "Last Man Standing",
+      "description": "Be the last one to go to bed during a server-hosted event involving drinking."
+    },
+    {
+      "id": "last_woman_standing",
+      "name": "Last Woman Standing",
+      "description": "Be the last one to go to bed during a server-hosted event involving drinking."
+    },
+    {
+      "id": "bump_queen",
+      "name": "Bump Queen",
+      "description": "The number one Bumper from before we even had a leaderboard."
+    }
+  ]
 }
