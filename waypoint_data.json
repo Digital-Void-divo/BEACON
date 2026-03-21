@@ -1,13 +1,18 @@
 {
   "waypoints": {
     "204185815696277504": [
-      "first_transmission"
+      "first_transmission",
+      "signal_thief"
     ],
     "1110321588613685382": [
       "wasteland_champion"
     ]
   },
-  "bump_dates": {},
+  "bump_dates": {
+    "204185815696277504": [
+      "2026-03-21"
+    ]
+  },
   "podium_counts": {
     "1110321588613685382": 1,
     "118358069276049414": 1,
