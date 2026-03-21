@@ -24,6 +24,7 @@ COMMANDS:
   /bumpboardreset     — (Admin only) Reset the current leaderboard without archiving
   /waypointcheck      — View earned Waypoints for yourself or another member
   /waypointgrant      — (Owner only) Grant a custom Waypoint to a member
+  /waypointinitialize — (Admin only) Scan existing data and award all missing Waypoints
   /beaconscrape       — (Admin only) Scan full channel history and calculate all bumps + steals
 
 FUTURE EXPANSION POINTS (marked with # TODO: ACHIEVEMENTS):
@@ -60,10 +61,15 @@ DISBOARD_BOT_ID      = 302050872383242240
 BUMP_COOLDOWN_HOURS  = 2
 STEAL_WINDOW_SECONDS = 30
 OWNER_ID             = 204185815696277504  # only this user can /waypointgrant
+ANNOUNCE_CHANNEL_ID  = 1470826482015146024  # channel for all waypoint announcements
 
 # In-memory cache of custom_waypoints list from waypoint_data.json
 # Populated on bot ready and refreshed on every save_waypoint_data call
 _custom_waypoints_cache: list = []
+
+def get_announce_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """Return the designated waypoint announcement channel, or None if not found."""
+    return guild.get_channel(ANNOUNCE_CHANNEL_ID)
 
 # ─── WAYPOINTS ────────────────────────────────────────────────────────────────
 
@@ -405,16 +411,22 @@ def build_waypoint_image(earned_ids: list, custom_wps: list, page: int = 0) -> B
             r, g, b = rgb.split()
             slot = Image.merge("RGBA", (r, g, b, slot.split()[3]))
 
-        if earned:
-            wp_path = WAYPOINT_IMG_DIR / f"{wp['id']}.png"
-            if wp_path.exists():
-                wp_img = Image.open(wp_path).convert("RGBA")
-                rx0 = int(badge_w * SLOT_WP_LEFT)
-                ry0 = int(badge_h * SLOT_WP_TOP)
-                rx1 = int(badge_w * SLOT_WP_RIGHT)
-                ry1 = int(badge_h * SLOT_WP_BOTTOM)
-                wp_img = wp_img.resize((rx1 - rx0, ry1 - ry0), Image.LANCZOS)
-                slot.paste(wp_img, (rx0, ry0), wp_img.split()[3])
+        wp_path = WAYPOINT_IMG_DIR / f"{wp['id']}.png"
+        if wp_path.exists():
+            wp_img = Image.open(wp_path).convert("RGBA")
+            rx0 = int(badge_w * SLOT_WP_LEFT)
+            ry0 = int(badge_h * SLOT_WP_TOP)
+            rx1 = int(badge_w * SLOT_WP_RIGHT)
+            ry1 = int(badge_h * SLOT_WP_BOTTOM)
+            wp_img = wp_img.resize((rx1 - rx0, ry1 - ry0), Image.LANCZOS)
+            if not earned:
+                # Desaturate and dim the waypoint art for unearned slots
+                rgb_wp  = wp_img.convert("RGB")
+                rgb_wp  = ImageEnhance.Color(rgb_wp).enhance(0.10)
+                rgb_wp  = ImageEnhance.Brightness(rgb_wp).enhance(0.40)
+                r2, g2, b2 = rgb_wp.split()
+                wp_img  = Image.merge("RGBA", (r2, g2, b2, wp_img.split()[3]))
+            slot.paste(wp_img, (rx0, ry0), wp_img.split()[3])
 
         # Nameplate text
         draw  = ImageDraw.Draw(slot)
@@ -596,19 +608,21 @@ async def handle_successful_bump(disboard_message: discord.Message):
     embed = discord.Embed(title=title, description="\n".join(lines), color=color, timestamp=now)
     await disboard_message.channel.send(embed=embed)
 
-    # Announce any newly earned waypoints
-    wp_lookup = {wp["id"]: wp for wp in WAYPOINTS}
-    for wp_id in newly_earned:
-        wp = wp_lookup.get(wp_id)
-        if not wp:
-            continue
-        wp_embed = discord.Embed(
-            title="📡 WAYPOINT UNLOCKED",
-            description=f"<@{user_id}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
-            color=discord.Color.gold(),
-            timestamp=now,
-        )
-        await disboard_message.channel.send(embed=wp_embed)
+    # Announce any newly earned waypoints to the designated channel
+    if newly_earned:
+        ann_ch = get_announce_channel(disboard_message.guild) or disboard_message.channel
+        wp_lookup = {wp["id"]: wp for wp in WAYPOINTS}
+        for wp_id in newly_earned:
+            wp = wp_lookup.get(wp_id)
+            if not wp:
+                continue
+            wp_embed = discord.Embed(
+                title="📡 WAYPOINT UNLOCKED",
+                description=f"<@{user_id}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
+                color=discord.Color.gold(),
+                timestamp=now,
+            )
+            await ann_ch.send(embed=wp_embed)
 
 # ─── SLASH COMMANDS ───────────────────────────────────────────────────────────
 
@@ -903,20 +917,22 @@ async def bumpboardcycle(interaction: discord.Interaction, name: str):
     print(f"[bumpboardcycle] Archived cycle '{name}' — {total_bumps} bumps, {len(cycle_entry['bumps'])} users.")
 
     # Announce any waypoints earned from cycle placement
-    wp_lookup = {wp["id"]: wp for wp in WAYPOINTS}
-    now = datetime.now(timezone.utc)
-    for uid, wp_ids in cycle_awards.items():
-        for wp_id in wp_ids:
-            wp = wp_lookup.get(wp_id)
-            if not wp:
-                continue
-            wp_embed = discord.Embed(
-                title="📡 WAYPOINT UNLOCKED",
-                description=f"<@{uid}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
-                color=discord.Color.gold(),
-                timestamp=now,
-            )
-            await interaction.channel.send(embed=wp_embed)
+    if cycle_awards:
+        ann_ch  = get_announce_channel(interaction.guild) or interaction.channel
+        wp_lookup = {wp["id"]: wp for wp in WAYPOINTS}
+        now_ts  = datetime.now(timezone.utc)
+        for uid, wp_ids in cycle_awards.items():
+            for wp_id in wp_ids:
+                wp = wp_lookup.get(wp_id)
+                if not wp:
+                    continue
+                wp_embed = discord.Embed(
+                    title="📡 WAYPOINT UNLOCKED",
+                    description=f"<@{uid}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
+                    color=discord.Color.gold(),
+                    timestamp=now_ts,
+                )
+                await ann_ch.send(embed=wp_embed)
 
 
 @bumpboardcycle.error
@@ -1175,19 +1191,139 @@ async def waypointgrant(interaction: discord.Interaction, member: discord.Member
         ephemeral=True
     )
 
-    # Announce in channel
+    # Announce in designated channel
+    ann_ch = get_announce_channel(interaction.guild) or interaction.channel
     announce_embed = discord.Embed(
         title="📡 WAYPOINT UNLOCKED",
         description=f"<@{uid}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
         color=discord.Color.gold(),
         timestamp=datetime.now(timezone.utc),
     )
-    await interaction.channel.send(embed=announce_embed)
+    await ann_ch.send(embed=announce_embed)
 
 
 @waypointgrant.error
 async def waypointgrant_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     await interaction.response.send_message("❌ An error occurred with /waypointgrant.", ephemeral=True)
+
+
+
+@bot.tree.command(name="waypointinitialize", description="[Admin] Scan existing data and award missing Waypoints to all members")
+@app_commands.checks.has_permissions(administrator=True)
+async def waypointinitialize(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    await interaction.followup.send("🔍 Scanning bump data and awarding missing Waypoints...", ephemeral=True)
+
+    data    = await load_data()
+    wp_data = await load_waypoint_data()
+
+    all_uids    = set(data.get("bumps", {}).keys()) | set(data.get("steals", {}).keys())
+    cycles      = data.get("cycles", [])
+    wp_lookup   = {wp["id"]: wp for wp in WAYPOINTS}
+    ann_ch      = get_announce_channel(interaction.guild) or interaction.channel
+    now         = datetime.now(timezone.utc)
+    total_granted = 0
+    grant_lines   = []
+
+    for uid in all_uids:
+        bump_count  = data["bumps"].get(uid, 0)
+        steal_count = data["steals"].get(uid, 0)
+        newly       = []
+
+        def _try(wp_id):
+            if award_waypoint(wp_data, uid, wp_id):
+                newly.append(wp_id)
+
+        # Bump milestones
+        if bump_count >= 1:   _try("first_transmission")
+        if bump_count >= 10:  _try("signal_booster")
+        if bump_count >= 50:  _try("tower_operator")
+        if bump_count >= 100: _try("grid_architect")
+
+        # Steal milestones
+        if steal_count >= 1:  _try("signal_thief")
+        if steal_count >= 5:  _try("scavenger")
+        if steal_count >= 25: _try("frequency_jacker")
+        if steal_count >= 50: _try("ransomware")
+
+        # Reliable signal — check bump_dates if already populated
+        bump_dates = wp_data.get("bump_dates", {}).get(uid, [])
+        if len(bump_dates) >= 7:
+            dates = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in bump_dates)
+            for i in range(len(dates) - 6):
+                streak = dates[i:i + 7]
+                if all((streak[j + 1] - streak[j]).days == 1 for j in range(6)):
+                    _try("reliable_signal")
+                    break
+
+        if newly:
+            total_granted += len(newly)
+            member = interaction.guild.get_member(int(uid))
+            name   = member.display_name if member else data.get("names", {}).get(uid, uid)
+            for wp_id in newly:
+                wp = wp_lookup.get(wp_id)
+                if not wp:
+                    continue
+                grant_lines.append(f"**{name}** → {wp['name']}")
+                wp_embed = discord.Embed(
+                    title="📡 WAYPOINT UNLOCKED",
+                    description=f"<@{uid}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
+                    color=discord.Color.gold(),
+                    timestamp=now,
+                )
+                await ann_ch.send(embed=wp_embed)
+
+    # Cycle-based waypoints — replay full cycle history
+    wp_data_cycle_copy = dict(wp_data)  # pass same dict so state accumulates correctly
+    for cycle in cycles:
+        cycle_awards = check_cycle_waypoints(wp_data_cycle_copy, cycle.get("bumps", {}))
+        for uid, wp_ids in cycle_awards.items():
+            for wp_id in wp_ids:
+                wp = wp_lookup.get(wp_id)
+                if not wp:
+                    continue
+                total_granted += 1
+                member = interaction.guild.get_member(int(uid))
+                name   = member.display_name if member else data.get("names", {}).get(uid, uid)
+                grant_lines.append(f"**{name}** → {wp['name']}")
+                wp_embed = discord.Embed(
+                    title="📡 WAYPOINT UNLOCKED",
+                    description=f"<@{uid}> has earned the **{wp['name']}** Waypoint!\n*{wp['description']}*",
+                    color=discord.Color.gold(),
+                    timestamp=now,
+                )
+                await ann_ch.send(embed=wp_embed)
+
+    # Note: Speedy, Clockwork, Race Condition cannot be retroactively determined
+    # (requires per-bump timestamps not stored). Skipped silently.
+
+    await save_waypoint_data(wp_data_cycle_copy)
+
+    if grant_lines:
+        # Split summary into chunks to avoid embed limits
+        chunk_size = 20
+        chunks = [grant_lines[i:i + chunk_size] for i in range(0, len(grant_lines), chunk_size)]
+        for i, chunk in enumerate(chunks):
+            summary = discord.Embed(
+                title=f"✅ Initialization Complete ({i + 1}/{len(chunks)})",
+                description="\n".join(chunk),
+                color=discord.Color.teal(),
+                timestamp=now,
+            )
+            summary.set_footer(text=f"{total_granted} total Waypoints granted")
+            await interaction.followup.send(embed=summary, ephemeral=True)
+    else:
+        await interaction.followup.send(
+            "✅ Scan complete — no missing Waypoints found. Everyone is up to date.",
+            ephemeral=True
+        )
+    print(f"[waypointinitialize] Complete — {total_granted} Waypoints granted across {len(all_uids)} users.")
+
+
+@waypointinitialize.error
+async def waypointinitialize_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("❌ You need Administrator permissions to run this command.", ephemeral=True)
 
 
 # ─── RUN ──────────────────────────────────────────────────────────────────────
