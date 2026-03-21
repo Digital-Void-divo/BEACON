@@ -1154,7 +1154,17 @@ async def waypointcheck(interaction: discord.Interaction, member: discord.Member
 @waypointcheck.error
 async def waypointcheck_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("❌ You need permissions to run this command.", ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("❌ You need permissions to run this command.", ephemeral=True)
+    else:
+        print(f"❌ /waypointcheck error: {error}")
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send("❌ Something went wrong.", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Something went wrong.", ephemeral=True)
+        except Exception:
+            pass
 
 
 # ─── WAYPOINTGRANT COMMAND ─────────────────────────────────────────────────────
